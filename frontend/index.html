@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hiking Planner — SF Bay Area</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <h1>🥾 Hiking Planner</h1>
+      <p>Your hiking planning assistant for the San Francisco Bay Area</p>
+    </header>
+
+    <main id="messages" class="messages" aria-live="polite"></main>
+
+    <div id="status" class="status" role="status"></div>
+
+    <form id="chat-form" class="chat-form">
+      <input
+        id="chat-input"
+        type="text"
+        placeholder="Tell me about the hike you're looking for..."
+        autocomplete="off"
+        required
+      />
+      <button type="submit">Send</button>
+    </form>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
