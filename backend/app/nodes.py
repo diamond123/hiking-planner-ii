@@ -17,6 +17,7 @@ from app.constants import (
     NON_US_COUNTRY_KEYWORDS,
     PREFERENCE_TOPICS,
     PREFERENCE_TOPIC_LABELS,
+    PREFERENCE_TOPIC_ORDER,
     SAME_DAY_CUTOFF_HOUR,
 )
 from app.db import get_document_by_source
@@ -275,7 +276,11 @@ def extract_slots(state: HikingState) -> dict:
             }
 
     known_topics = _extract_known_preference_topics(preferences_text)
-    missing_topics = [] if _is_no_preference(preferences_text) else sorted(ALL_PREFERENCE_TOPICS - known_topics)
+    missing_topics = (
+        []
+        if _is_no_preference(preferences_text)
+        else [t for t in PREFERENCE_TOPIC_ORDER if t in ALL_PREFERENCE_TOPICS - known_topics]
+    )
     preferences_ask_count = state.get("preferences_ask_count", 0)
 
     # Stop asking for additional preferences after two asks.

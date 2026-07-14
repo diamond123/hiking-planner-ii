@@ -8,7 +8,7 @@ from langchain_core.messages import HumanMessage
 
 from app.graph import compiled_graph
 from app.rate_limit import enforce_rate_limit
-from app.schemas import ChatRequest, TurnstileVerifyRequest
+from app.schemas import ChatRequest, EndSessionRequest, TurnstileVerifyRequest
 from app.security import verify_api_key
 from app.turnstile import verify_turnstile_token
 
@@ -35,6 +35,12 @@ async def verify_turnstile(req: TurnstileVerifyRequest, request: Request):
     remote_ip = request.client.host if request.client else None
     if not verify_turnstile_token(req.token, remote_ip):
         raise HTTPException(status_code=403, detail="Human verification failed")
+    return {"success": True}
+
+
+@app.post("/api/end-session", dependencies=[Depends(enforce_rate_limit), Depends(verify_api_key)])
+async def end_session(req: EndSessionRequest):
+    await compiled_graph.checkpointer.adelete_thread(req.session_id)
     return {"success": True}
 
 

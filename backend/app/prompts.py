@@ -94,7 +94,10 @@ Do not flag ordinary preferences like "long hike", "steep", "great views", "mode
 specific-but-plausible numbers (e.g. "10 miles", "2000 feet of elevation gain").
 """
 
-RIDICULOUS_PREFERENCE_MESSAGE = "Are you serious? I cannot find a hiking place for that."
+RIDICULOUS_PREFERENCE_MESSAGE = (
+    "Are you serious? I cannot find a hiking place for that. "
+    "Could you give me a more realistic preference?"
+)
 
 WEATHER_JUDGE_SYSTEM_PROMPT = """You are judging whether weather conditions are suitable for hiking, based on \
 web search results. Default to ok=true when the evidence is inconclusive or the search results don't clearly \

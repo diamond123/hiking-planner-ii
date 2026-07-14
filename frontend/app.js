@@ -10,6 +10,7 @@ let API_KEY = "";
 let API_URL = "";
 let TURNSTILE_SITE_KEY = "";
 let TURNSTILE_VERIFY_URL = "";
+let END_SESSION_URL = "";
 
 function loadApiConfig() {
   const env = (typeof import.meta !== "undefined" && import.meta.env) || {};
@@ -18,6 +19,7 @@ function loadApiConfig() {
   API_URL = env.API_URL || "http://localhost:8000/api/chat";
   TURNSTILE_SITE_KEY = env.TURNSTILE_SITE_KEY || "";
   TURNSTILE_VERIFY_URL = API_URL.replace(/\/api\/chat$/, "/api/verify-turnstile");
+  END_SESSION_URL = API_URL.replace(/\/api\/chat$/, "/api/end-session");
 }
 
 function getSessionId() {
@@ -29,11 +31,106 @@ function getSessionId() {
   return id;
 }
 
-const sessionId = getSessionId();
+let sessionId = getSessionId();
 
-function appendMessage(role, { text, markdown } = {}) {
+// Inactivity handling: if the user doesn't reply for a while after the
+// assistant asks something, nudge them once, then end the session and start
+// a fresh one if they still don't respond. Purely client-side (timers) plus
+// a best-effort call to drop the abandoned session's backend state.
+const INACTIVITY_NUDGE_MS = 2 * 60 * 1000;
+const INACTIVITY_END_MS = 2 * 60 * 1000;
+const REPEAT_QUESTION_MAX_LENGTH = 220;
+// How long to leave the goodbye message on screen before minting a new
+// session_id and re-enabling the input, so it doesn't get wiped before the
+// user has a chance to read it.
+const SESSION_RESET_DELAY_MS = 4000;
+// How long to leave the *old conversation's messages* visible on screen after
+// a session ends, in case the user comes back and wants to see them — much
+// longer than SESSION_RESET_DELAY_MS, which only governs when the input
+// unlocks. Cleared either when this elapses, or immediately when the user
+// sends a new message (whichever comes first), so an old and new conversation
+// never visually blend together.
+const HISTORY_CLEAR_DELAY_MS = 20 * 60 * 1000;
+
+let inactivityTimer = null;
+let historyClearTimer = null;
+let lastAssistantText = "";
+
+function clearInactivityTimer() {
+  if (inactivityTimer) {
+    clearTimeout(inactivityTimer);
+    inactivityTimer = null;
+  }
+}
+
+function scheduleInactivityNudge() {
+  clearInactivityTimer();
+  inactivityTimer = setTimeout(showInactivityNudge, INACTIVITY_NUDGE_MS);
+}
+
+function showInactivityNudge() {
+  const canRepeat = lastAssistantText && lastAssistantText.length <= REPEAT_QUESTION_MAX_LENGTH;
+  const text = canRepeat
+    ? `Are you still there? Just checking back in — ${lastAssistantText}`
+    : "Are you still there?";
+  appendMessage("assistant", { text, nudge: true });
+  inactivityTimer = setTimeout(endSessionDueToInactivity, INACTIVITY_END_MS);
+}
+
+async function endSessionDueToInactivity() {
+  clearInactivityTimer();
+  appendMessage("assistant", {
+    text: "Looks like something might have come up on your end. Bye for now — see you next time!",
+    nudge: true,
+  });
+  inputEl.disabled = true;
+  formEl.querySelector("button").disabled = true;
+
+  try {
+    await fetch(END_SESSION_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-API-Key": API_KEY },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+  } catch (err) {
+    // Best-effort backend cleanup only; still start a fresh session locally either way.
+  }
+
+  // Leave the goodbye message visible for a moment before resetting, instead
+  // of wiping it away in the same tick it was shown.
+  setTimeout(startNewSession, SESSION_RESET_DELAY_MS);
+}
+
+function clearHistoryClearTimer() {
+  if (historyClearTimer) {
+    clearTimeout(historyClearTimer);
+    historyClearTimer = null;
+  }
+}
+
+function clearMessageHistory() {
+  clearHistoryClearTimer();
+  messagesEl.innerHTML = "";
+}
+
+function startNewSession() {
+  sessionStorage.removeItem("session_id");
+  sessionId = getSessionId();
+  lastAssistantText = "";
+  setStatus("");
+  inputEl.disabled = false;
+  formEl.querySelector("button").disabled = false;
+  inputEl.focus();
+
+  // Old messages stay visible for a while rather than being wiped immediately.
+  clearHistoryClearTimer();
+  historyClearTimer = setTimeout(clearMessageHistory, HISTORY_CLEAR_DELAY_MS);
+}
+
+function appendMessage(role, { text, markdown, nudge } = {}) {
   const bubble = document.createElement("div");
   bubble.className = `msg ${role}`;
+  if (nudge) bubble.classList.add("nudge");
   if (markdown) {
     bubble.classList.add("plan");
     bubble.innerHTML = marked.parse(markdown);
@@ -51,6 +148,14 @@ function setStatus(text) {
 }
 
 async function sendMessage(text) {
+  clearInactivityTimer();
+  if (historyClearTimer) {
+    // A prior session ended and its messages were just left on screen for
+    // reference; now that the user is actually chatting again, clear them so
+    // the old and new conversations don't visually blend together.
+    clearMessageHistory();
+  }
+
   if (!API_KEY) {
     appendMessage("assistant", {
       text: "Missing API key. Set API_KEY in environment or .env.",
@@ -115,10 +220,14 @@ function handleEvent(evt) {
     setStatus(evt.text);
   } else if (evt.type === "final") {
     setStatus("");
+    lastAssistantText = evt.markdown || "";
     appendMessage("assistant", { markdown: evt.markdown });
+    scheduleInactivityNudge();
   } else if (evt.type === "error") {
     setStatus("");
+    lastAssistantText = evt.text || "";
     appendMessage("assistant", { text: evt.text });
+    scheduleInactivityNudge();
   }
 }
 

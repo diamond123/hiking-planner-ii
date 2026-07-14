@@ -129,6 +129,11 @@ body {
   white-space: normal;
 }
 
+.msg.assistant.nudge {
+  font-style: italic;
+  opacity: 0.85;
+}
+
 .msg.assistant.plan h1,
 .msg.assistant.plan h2,
 .msg.assistant.plan h3 {

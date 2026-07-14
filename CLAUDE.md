@@ -54,7 +54,7 @@ time. Concretely:
 
 ### Backend (`backend/app/`) — FastAPI + LangGraph agent
 
-Two POST endpoints, both gated by an `X-API-Key` header checked against `BACKEND_API_KEY` in `.env` (see
+Three POST endpoints, all gated by an `X-API-Key` header checked against `BACKEND_API_KEY` in `.env` (see
 `security.py`) and rate-limited via `enforce_rate_limit` (`rate_limit.py`) to `RATE_LIMIT_PER_SECOND` (5, in
 `constants.py`) requests per second per client IP (`request.client.host`), sliding-window, returning `429`
 with `Retry-After: 1` over the limit. Both dependencies are wired rate-limit-first, so a flood is rejected
@@ -67,6 +67,10 @@ limit.
   `verify_turnstile_token()` (`turnstile.py`), which POSTs to Cloudflare's `siteverify` API with
   `TURNSTILE_SECRET_KEY` and the client IP. Returns `{"success": true}` or `403`. This is the backend half
   of the human-verification gate described in the Frontend section below — see there for the full flow.
+- `POST /api/end-session` — body `{session_id}`, calls `compiled_graph.checkpointer.adelete_thread(session_id)`
+  to drop that thread's checkpointed state entirely. Used by the frontend's inactivity handling (see below)
+  to actually free the abandoned session's memory rather than leaving it to linger forever — `InMemorySaver`
+  has no TTL/expiry of its own.
 - `POST /api/chat` — body `{session_id, message}`. The response is a **streamed
 NDJSON body** (`application/x-ndjson`), one JSON object per line:
 - `{"type": "status", "text": "..."}` — progress updates emitted while the graph runs
@@ -155,17 +159,22 @@ trail-specific search and condition checks happen after. Flow, in order:
      message (even an unrelated one) retries the geocode call again.
    - **Preference-topic tracking**: `_extract_known_preference_topics()` regexes `preferences_text`
      against `PREFERENCE_TOPICS` (`views`/`difficulty`/`elevation_gain`/`distance` keyword lists in
-     `constants.py`) to compute `missing_preference_topics`. `_is_no_preference()` recognizes several
-     "no preference" phrasings as a substring match to short-circuit further asking.
+     `constants.py`) to compute `missing_preference_topics`, ordered by `PREFERENCE_TOPIC_ORDER`
+     (`["distance", "views", "difficulty", "elevation_gain"]`, in `constants.py`) rather than alphabetically
+     — a deliberate product choice for which order `ask_preferences` asks about missing topics in, not an
+     incidental one. `_is_no_preference()` recognizes several "no preference" phrasings as a substring match
+     to short-circuit further asking.
    - **Preference realism check**: whenever `preferences_text` changes to genuinely new, non-"no
      preference" content, `preference_realism_llm` (structured output `PreferenceRealismVerdict`,
      `PREFERENCE_REALISM_SYSTEM_PROMPT`) judges whether it's physically achievable for a single-day Bay
      Area hike (calibrated to ~20-25 miles / ~5,000-6,000 ft gain as the realistic upper bound), defaulting
-     to realistic when reasonable or ambiguous. Unrealistic → flat `RIDICULOUS_PREFERENCE_MESSAGE` ("Are
-     you serious? I cannot find a hiking place for that."), `route_signal="off_topic"` (reusing the same
-     hard-stop-this-turn signal as the location scope check — it doesn't literally mean off-topic, just
-     "end the turn now"), and `preferences_text` is *not* persisted, so the rejected preference is
-     forgotten rather than stuck permanently — the user can simply state a different one next turn. Only
+     to realistic when reasonable or ambiguous. Unrealistic → `RIDICULOUS_PREFERENCE_MESSAGE` ("Are you
+     serious? I cannot find a hiking place for that. Could you give me a more realistic preference?"),
+     `route_signal="off_topic"` (reusing the same hard-stop-this-turn signal as the location scope check —
+     it doesn't literally mean off-topic, just "end the turn now"), and `preferences_text` is *not*
+     persisted, so the rejected preference is forgotten rather than stuck permanently — the user can simply
+     state a different one next turn, and `hiking_date`/`location_text` (already-known slots) are preserved
+     in the same return so they don't need to be re-given, mirroring the date-rejection recovery flow. Only
      runs when `preferences_text` actually changed from its prior value (not on every turn), to avoid
      re-judging already-accepted preferences on every subsequent slot-filling turn.
    - **Date realism check**: `_validate_hike_date()` rejects a resolved `YYYY-MM-DD` `hiking_date` if it's
@@ -277,6 +286,37 @@ like `.app { display: flex }` — author stylesheets win specificity ties over t
 via an explicit `.app[hidden], .gate[hidden] { display: none }` rule in `style.css`. If you add another
 toggled section styled with its own `display`, it needs the same `[hidden]` override or it'll render
 regardless of the `hidden` property.
+
+**Inactivity handling**: purely client-side (`app.js`) — there's no server-push channel (no WebSocket/SSE),
+so the backend can never proactively message the user; only the frontend can notice idle time via timers.
+`scheduleInactivityNudge()` is called every time an assistant response lands (`handleEvent`, on `"final"`/
+`"error"`) and cancelled (`clearInactivityTimer()`) the moment the user sends anything (`sendMessage()`), so
+only genuine silence *after* an assistant message accumulates. Two-stage timeout: after
+`INACTIVITY_NUDGE_MS` (2 min) of silence, `showInactivityNudge()` appends an italicized "Are you still
+there?" bubble — repeating the last assistant message verbatim if it's short (`<= REPEAT_QUESTION_MAX_LENGTH`,
+220 chars, so real questions get repeated but full markdown plans don't dump a wall of text back at the
+user) — then arms a second timer. After another `INACTIVITY_END_MS` (2 min, 4 min total) of continued
+silence, `endSessionDueToInactivity()` shows a goodbye message, disables the input, best-effort POSTs to
+`/api/end-session` to drop the backend's checkpointed state for that thread, then calls `startNewSession()`.
+
+**Session identity reset vs. message history clearing are deliberately decoupled**, driven by two separate
+timers:
+- `startNewSession()` runs after `SESSION_RESET_DELAY_MS` (4s, not immediately — an earlier version cleared
+  `messagesEl.innerHTML` in the same tick the goodbye message was appended, so it never actually rendered
+  before vanishing). It drops `sessionStorage.session_id`, mints a new one, and re-enables the input — so
+  the same tab can start a new conversation right away without a page reload. It does **not** touch
+  `messagesEl`.
+- The old conversation's messages (including the goodbye bubble) stay on screen for up to
+  `HISTORY_CLEAR_DELAY_MS` (20 min) after that, in case the user comes back and wants to see them —
+  `startNewSession()` arms `historyClearTimer` for this. Whichever comes first wins: either the 20 minutes
+  elapse and `clearMessageHistory()` fires on its own, or the user sends a new message first, in which case
+  `sendMessage()` checks for a pending `historyClearTimer` and calls `clearMessageHistory()` immediately —
+  so a returning user's new conversation never visually blends with the old one, but also isn't forced to
+  wait out the full 20 minutes to start it.
+
+Verified with Playwright's `page.clock` (fake timers) rather than waiting out real minutes — if you touch
+this, install the fake clock *before* triggering the action whose `setTimeout` you want to control, not
+after; a clock installed after a real timer is already pending won't affect that timer.
 
 ## Environment variables
 

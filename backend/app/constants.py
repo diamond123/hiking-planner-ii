@@ -26,6 +26,10 @@ PREFERENCE_TOPIC_LABELS = {
 
 ALL_PREFERENCE_TOPICS = set(PREFERENCE_TOPICS)
 
+# Order missing preference topics are asked about in, when more than one is
+# still missing. Not alphabetical — a deliberate, product-chosen order.
+PREFERENCE_TOPIC_ORDER = ["distance", "views", "difficulty", "elevation_gain"]
+
 NON_CA_STATE_NAMES = {
     "alabama",
     "alaska",
