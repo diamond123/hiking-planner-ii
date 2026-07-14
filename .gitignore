@@ -20,3 +20,6 @@ npm-debug.log*
 
 # misc
 hiking_planner_specification.md
+
+# Qdrant vector store + sqlite doc data (large, provisioned locally, not versioned)
+backend/qdrant_data/
