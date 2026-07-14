@@ -19,8 +19,15 @@ RouteSignal = Literal[
 class HikingState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
 
+    # index into `messages` where the current planning request starts; messages
+    # before this index belong to an already-completed prior request and are
+    # excluded from slot extraction, so a finished plan's date/location/prefs
+    # don't leak into the next one. Persists across turns via the checkpointer.
+    request_start_index: int
+
     # slot-filling, persists across turns via the checkpointer
     hiking_date: str | None
+    date_rejection_reason: str | None
     preferences_text: str | None
     preferences_asked: bool
     preferences_ask_count: int

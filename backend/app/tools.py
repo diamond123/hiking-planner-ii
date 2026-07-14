@@ -4,7 +4,7 @@ import requests
 from langchain_tavily import TavilySearch
 
 logger = logging.getLogger(__name__)
-_tavily = TavilySearch(max_results=5)
+_tavily = TavilySearch(max_results=3)
 
 
 def _format_results(raw: dict) -> str:

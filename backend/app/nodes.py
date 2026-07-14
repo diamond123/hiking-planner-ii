@@ -1,6 +1,6 @@
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -10,17 +10,26 @@ from app.constants import (
     ALL_PREFERENCE_TOPICS,
     BAY_AREA_FALLBACK_LATLON,
     MAX_ATTEMPTS,
+    MAX_DATE_DAYS_AHEAD,
     MAX_PREFERENCE_ASKS,
     NON_CA_STATE_CODES,
     NON_CA_STATE_NAMES,
     NON_US_COUNTRY_KEYWORDS,
     PREFERENCE_TOPICS,
     PREFERENCE_TOPIC_LABELS,
+    SAME_DAY_CUTOFF_HOUR,
 )
 from app.db import get_document_by_source
 from app.geocode import geocode_location
-from app.llm import condition_judge_llm, guardrail_llm, plan_writer_llm, slot_extractor_llm
+from app.llm import (
+    condition_judge_llm,
+    guardrail_llm,
+    plan_writer_llm,
+    preference_realism_llm,
+    slot_extractor_llm,
+)
 from app.prompts import (
+    ASK_DATE_AGAIN_TEMPLATE,
     ASK_DATE_MESSAGE,
     ASK_LOCATION_CLARIFICATION_MESSAGE,
     ASK_PREFERENCES_MESSAGE,
@@ -31,7 +40,9 @@ from app.prompts import (
     GUARDRAIL_SYSTEM_PROMPT,
     NO_CANDIDATES_MESSAGE,
     LOCATION_SCOPE_REJECTION_MESSAGE,
+    PREFERENCE_REALISM_SYSTEM_PROMPT,
     REFUSAL_MESSAGE,
+    RIDICULOUS_PREFERENCE_MESSAGE,
     TRAIL_JUDGE_SYSTEM_PROMPT,
     WEATHER_BAD_TEMPLATE,
     WEATHER_JUDGE_SYSTEM_PROMPT,
@@ -41,6 +52,21 @@ from app.state import HikingState
 from app.tools import search_trail_conditions, search_weather
 
 logger = logging.getLogger(__name__)
+
+# Leading relational filler words that break Nominatim geocoding if left in
+# (e.g. "close to san jose" resolves to nothing, but "san jose" resolves fine).
+# The extraction prompt/schema also instruct the LLM to strip these, but that's
+# not fully reliable on its own, so this is a deterministic backstop.
+_LOCATION_FILLER_PREFIX_RE = re.compile(
+    r"^(?:close to|near to|near|around|by|next to|in the vicinity of|in)\s+",
+    re.IGNORECASE,
+)
+
+
+def _strip_location_filler(location_text: str) -> str:
+    cleaned = _LOCATION_FILLER_PREFIX_RE.sub("", location_text).strip()
+    return cleaned or location_text
+
 
 def _normalize_or_reject_location(location_text: str) -> tuple[str, bool]:
     normalized = location_text.strip()
@@ -119,8 +145,28 @@ def _is_no_preference(preferences_text: str | None) -> bool:
     return any(lowered.find(variant) != -1 for variant in no_pref_variants)
 
 
+def _validate_hike_date(hiking_date: str) -> str | None:
+    """Return a rejection reason if the date isn't realistic, else None."""
+    try:
+        parsed_date = datetime.strptime(hiking_date, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        # Not a resolved YYYY-MM-DD (e.g. still a vague phrase) — nothing to validate yet.
+        return None
+
+    now_pacific = datetime.now(ZoneInfo("America/Los_Angeles"))
+    today = now_pacific.date()
+
+    if parsed_date < today:
+        return "that date is in the past"
+    if parsed_date > today + timedelta(days=MAX_DATE_DAYS_AHEAD):
+        return "that date is more than a year away"
+    if parsed_date == today and now_pacific.hour >= SAME_DAY_CUTOFF_HOUR:
+        return "it's already late afternoon, so there likely isn't enough daylight left to start a hike today"
+    return None
+
+
 def reset_turn(state: HikingState) -> dict:
-    return {
+    updates = {
         "attempt_count": 0,
         "excluded_sources": [],
         "candidate_chunk": None,
@@ -129,7 +175,30 @@ def reset_turn(state: HikingState) -> dict:
         "trail_result": None,
         "final_markdown": None,
         "route_signal": None,
+        "date_rejection_reason": None,
     }
+
+    if state.get("final_markdown"):
+        # A plan was completed last turn - start the next planning request from
+        # scratch instead of silently reusing the previous hike's slots. Clearing
+        # state alone isn't enough since slot_extractor_llm reads the full message
+        # history; also advance request_start_index so extract_slots stops feeding
+        # it the now-irrelevant messages from the completed request.
+        messages = state.get("messages") or []
+        logger.info("prior turn completed a plan; resetting slot-filling state for a new request")
+        updates.update({
+            "hiking_date": None,
+            "location_text": None,
+            "location_latlon": None,
+            "preferences_text": None,
+            "preferences_asked": False,
+            "preferences_ask_count": 0,
+            "known_preference_topics": [],
+            "missing_preference_topics": [],
+            "request_start_index": max(len(messages) - 1, 0),
+        })
+
+    return updates
 
 
 def guardrail(state: HikingState) -> dict:
@@ -162,16 +231,48 @@ def extract_slots(state: HikingState) -> dict:
             f"resolve a date precisely, return it as YYYY-MM-DD."
         )
 
+        # Only look at messages from the current planning request onward, so a
+        # previously completed plan's date/location/preferences don't get
+        # re-discovered from earlier turns still sitting in the message history.
+        start_index = state.get("request_start_index", 0)
+        relevant_messages = state["messages"][start_index:]
+
         slots = slot_extractor_llm.invoke(
-                [SystemMessage(content=system_prompt), *state["messages"]]
+                [SystemMessage(content=system_prompt), *relevant_messages]
             )
 
-    hiking_date = state.get("hiking_date") or (slots.hiking_date if slots else None)
+    hiking_date =  slots.hiking_date if slots else state.get("hiking_date")
 
-    location_text = state.get("location_text") or (slots.location_text if slots else None)
+    date_rejection_reason = _validate_hike_date(hiking_date) if hiking_date else None
+    if date_rejection_reason:
+        logger.info("rejecting hiking_date %r: %s", hiking_date, date_rejection_reason)
+        hiking_date = None
 
+    location_text = slots.location_text if slots else state.get("location_text")
+    if location_text:
+        location_text = _strip_location_filler(location_text)
+
+    old_preferences_text = state.get("preferences_text")
     # preferences_text = ', '.join(filter(None, [state.get("preferences_text"), slots.preferences_text]))
-    preferences_text = slots.preferences_text if slots else state.get("preferences_text")
+    preferences_text = slots.preferences_text if slots else old_preferences_text
+
+    if (
+        preferences_text
+        and preferences_text != old_preferences_text
+        and not _is_no_preference(preferences_text)
+    ):
+        verdict = preference_realism_llm.invoke(
+            [SystemMessage(content=PREFERENCE_REALISM_SYSTEM_PROMPT), HumanMessage(content=preferences_text)]
+        )
+        if not verdict.is_realistic:
+            logger.info("rejecting unrealistic preferences %r: %s", preferences_text, verdict.reason)
+            return {
+                "messages": [AIMessage(content=RIDICULOUS_PREFERENCE_MESSAGE)],
+                "route_signal": "off_topic",
+                "hiking_date": hiking_date,
+                "date_rejection_reason": date_rejection_reason,
+                "location_text": location_text,
+            }
 
     known_topics = _extract_known_preference_topics(preferences_text)
     missing_topics = [] if _is_no_preference(preferences_text) else sorted(ALL_PREFERENCE_TOPICS - known_topics)
@@ -182,24 +283,27 @@ def extract_slots(state: HikingState) -> dict:
         missing_topics = []
 
     location_latlon = state.get("location_latlon")
-    if location_text and not location_latlon:
+    if (location_text and not location_latlon) or (location_text != state.get("location_text")):
         logger.info("slot extraction location_text=%r", location_text)
-        location_text, in_scope = _normalize_or_reject_location(location_text)
+        normalized_location_text, in_scope = _normalize_or_reject_location(location_text)
 
         if not in_scope:
             logger.info("location out of scope for Bay Area planner: %r", location_text)
             return {
                 "messages": [AIMessage(content=LOCATION_SCOPE_REJECTION_MESSAGE)],
                 "route_signal": "off_topic",
+                "hiking_date": hiking_date,
+                "date_rejection_reason": date_rejection_reason,
             }
-        location_latlon = geocode_location(location_text)
+        location_latlon = geocode_location(normalized_location_text)
         if location_latlon:
-            logger.info("geocoding succeeded for %r: %s", location_text, location_latlon)
+            logger.info("geocoding succeeded for %r: %s", normalized_location_text, location_latlon)
         else:
-            logger.warning("geocoding returned no result for %r", location_text)
+            logger.warning("geocoding returned no result for %r", normalized_location_text)
 
     return {
         "hiking_date": hiking_date,
+        "date_rejection_reason": date_rejection_reason,
         "location_text": location_text,
         "preferences_text": preferences_text,
         "location_latlon": location_latlon,
@@ -210,7 +314,12 @@ def extract_slots(state: HikingState) -> dict:
 
 
 def ask_date(state: HikingState) -> dict:
-    return {"messages": [AIMessage(content=ASK_DATE_MESSAGE)]}
+    reason = state.get("date_rejection_reason")
+    if reason:
+        text = ASK_DATE_AGAIN_TEMPLATE.format(reason=reason)
+    else:
+        text = ASK_DATE_MESSAGE
+    return {"messages": [AIMessage(content=text)]}
 
 
 def ask_preferences(state: HikingState) -> dict:

@@ -54,8 +54,20 @@ time. Concretely:
 
 ### Backend (`backend/app/`) — FastAPI + LangGraph agent
 
-Single-endpoint API: `POST /api/chat`, gated by an `X-API-Key` header checked against `BACKEND_API_KEY` in
-`.env` (see `security.py`). Request body is `{session_id, message}`. The response is a **streamed
+Two POST endpoints, both gated by an `X-API-Key` header checked against `BACKEND_API_KEY` in `.env` (see
+`security.py`) and rate-limited via `enforce_rate_limit` (`rate_limit.py`) to `RATE_LIMIT_PER_SECOND` (5, in
+`constants.py`) requests per second per client IP (`request.client.host`), sliding-window, returning `429`
+with `Retry-After: 1` over the limit. Both dependencies are wired rate-limit-first, so a flood is rejected
+before the (cheap) API key check or any LLM/Tavily/Qdrant cost. **The rate limiter is per-process,
+in-memory** — correct for the current single uvicorn worker, but each worker would count independently if
+ever scaled to multiple processes; a shared store (e.g. Redis) would be needed for a real cross-worker
+limit.
+
+- `POST /api/verify-turnstile` — body `{token}`, verifies a Cloudflare Turnstile token via
+  `verify_turnstile_token()` (`turnstile.py`), which POSTs to Cloudflare's `siteverify` API with
+  `TURNSTILE_SECRET_KEY` and the client IP. Returns `{"success": true}` or `403`. This is the backend half
+  of the human-verification gate described in the Frontend section below — see there for the full flow.
+- `POST /api/chat` — body `{session_id, message}`. The response is a **streamed
 NDJSON body** (`application/x-ndjson`), one JSON object per line:
 - `{"type": "status", "text": "..."}` — progress updates emitted while the graph runs
 - `{"type": "final", "markdown": "...", "session_id": "..."}` — always the last line of every turn
@@ -69,15 +81,31 @@ to what the frontend displays; if you add a new long-running node, emit a `write
 at its start.
 
 **Conversation state** (`state.py`, `HikingState` TypedDict) is checkpointed per-session via LangGraph's
-`InMemorySaver`, keyed by `thread_id = session_id` (generated client-side, see frontend below). State
-splits into two intended lifetimes:
+`InMemorySaver`, keyed by `thread_id = session_id` (generated client-side, see frontend below). `reset_turn`
+is the graph's entry point, so it runs at the start of **every** `/api/chat` call, not just after a plan
+completes. State splits into two intended lifetimes:
 - **Persists across turns** (slot-filling): `hiking_date`, `location_text`, `location_latlon`,
   `preferences_text`, `preferences_asked`, `preferences_ask_count`, `known_preference_topics`,
-  `missing_preference_topics`.
-- **Reset every turn** by the `reset_turn` node (first node in the graph, always runs): `attempt_count`,
-  `excluded_sources`, `candidate_chunk`, `candidate_document`, `weather_result`, `trail_result`,
-  `final_markdown`, `route_signal`. The trail-retry loop (see below) is intra-turn — it does not span
-  multiple HTTP requests.
+  `missing_preference_topics`, `request_start_index`.
+- **Reset every turn** by `reset_turn`: `attempt_count`, `excluded_sources`, `candidate_chunk`,
+  `candidate_document`, `weather_result`, `trail_result`, `final_markdown`, `route_signal`,
+  `date_rejection_reason`. The trail-retry loop (see below) is intra-turn — it does not span multiple HTTP
+  requests.
+
+**Starting a new planning request after a completed plan**: `reset_turn` checks `state.get("final_markdown")`
+*before* clearing it — if truthy, the prior turn just finished a plan, so `reset_turn` also wipes the
+slot-filling fields above (`hiking_date`, `location_text`, `location_latlon`, `preferences_text`,
+`preferences_asked`, `preferences_ask_count`, `known_preference_topics`, `missing_preference_topics`) and
+sets `request_start_index` to the index of the just-appended new message. This is necessary but was **not
+sufficient on its own** the first time it was implemented: `extract_slots`'s `slot_extractor_llm` call reads
+the message history to (re)extract slots, and the completed request's messages (e.g. "hiking on 2026-07-25
+near Fremont") are still sitting in `messages` forever — clearing the state fields didn't stop the LLM from
+just re-deriving the same values by reading those old messages again, so a bare "plan me another hike" was
+observed silently regenerating the *same* prior plan with zero questions asked. The actual fix is
+`request_start_index`: `extract_slots` slices `state["messages"][request_start_index:]` before handing
+messages to `slot_extractor_llm`, so a completed request's messages are structurally excluded from
+extraction for the next one, not just hoped-away via cleared state. Defaults to `0` for a session's first
+request (extract from the whole history, as before).
 
 Conversations are **in-memory only** — they're lost on backend restart. There is no persistent chat
 history store.
@@ -93,23 +121,62 @@ trail-specific search and condition checks happen after. Flow, in order:
    and injection intent. Blocked → polite refusal, `route_signal="off_topic"`, graph ends (`END`).
 2. `extract_slots` — if every slot is already fully known (date, location, preferences with no
    `missing_preference_topics`), skips the LLM call entirely as a cost optimization. Otherwise calls
-   `slot_extractor_llm` (structured output `ExtractedSlots`) over the *full* message history, with a
-   system prompt dynamically extended to include **today's date in `America/Los_Angeles`** so relative
-   dates ("tomorrow", "this Saturday") resolve to absolute `YYYY-MM-DD`. Merges with prior known values.
+   `slot_extractor_llm` (structured output `ExtractedSlots`) over `messages[request_start_index:]` — i.e.
+   the current planning request's messages only, not the whole session (see the `request_start_index` note
+   above) — with a system prompt dynamically extended to include **today's date in `America/Los_Angeles`**
+   so relative dates ("tomorrow", "this Saturday") resolve to absolute `YYYY-MM-DD`. Merges with prior
+   known values.
    **Known sharp edge**: `EXTRACT_SLOTS_SYSTEM_PROMPT` has an explicit, hard-won instruction that
    `preferences_text` must stay `null` unless the assistant already asked about preferences earlier in the
    conversation — earlier versions caused the LLM to silently invent `"no specific preference"` on the
    very first turn, skipping the preferences question entirely. Re-verify this case if you touch that
    prompt.
+   - **Location filler-word stripping**: `_strip_location_filler()` removes leading relational words
+     ("near", "close to", "around", "by", "next to", "in the vicinity of", "in") from `location_text` via
+     regex before anything else touches it. This exists because Nominatim geocoding fails on phrases
+     containing them (`geocode_location("close to san jose, ...")` → no results, but `geocode_location("san
+     jose, ...")` resolves fine) — the LLM extractor was including these filler words verbatim because the
+     `ExtractedSlots.location_text` field description's own example used to read `'near Mount Diablo'`,
+     literally modeling the bug. Both the field description and `EXTRACT_SLOTS_SYSTEM_PROMPT` now instruct
+     the LLM to strip filler words itself, but `_strip_location_filler()` is a deterministic backstop, not
+     solely dependent on prompt compliance — apply it to any new place where `location_text` is produced.
    - **Location scope check**: if `location_text` is newly present, `_normalize_or_reject_location()`
      rejects it (`route_signal="off_topic"`, `LOCATION_SCOPE_REJECTION_MESSAGE`, ends turn) if it names a
      non-CA US state or non-US country (lists in `constants.py`); otherwise normalizes it (appends
      ", California"/", USA" if absent) before geocoding via Nominatim (`geocode.py`) into
      `location_latlon`, to improve geocoding precision and keep the assistant scoped to the Bay Area.
+     `geocode_location()` retries once (`GEOCODE_MAX_ATTEMPTS`, 1s backoff) before giving up, since
+     Nominatim is a free, shared, rate-limited public service that occasionally times out or throttles —
+     without a retry, a purely transient blip on a perfectly valid city (e.g. "Fremont") would surface to
+     the user as `ASK_LOCATION_CLARIFICATION_MESSAGE` ("couldn't confidently place that location") even
+     though nothing was wrong with the input. Note this is also naturally self-healing across turns even
+     without the retry: `location_text` persists once normalized, and `extract_slots` re-attempts
+     `geocode_location()` on *every* turn where `location_latlon` is still `None` — so the very next user
+     message (even an unrelated one) retries the geocode call again.
    - **Preference-topic tracking**: `_extract_known_preference_topics()` regexes `preferences_text`
      against `PREFERENCE_TOPICS` (`views`/`difficulty`/`elevation_gain`/`distance` keyword lists in
      `constants.py`) to compute `missing_preference_topics`. `_is_no_preference()` recognizes several
      "no preference" phrasings as a substring match to short-circuit further asking.
+   - **Preference realism check**: whenever `preferences_text` changes to genuinely new, non-"no
+     preference" content, `preference_realism_llm` (structured output `PreferenceRealismVerdict`,
+     `PREFERENCE_REALISM_SYSTEM_PROMPT`) judges whether it's physically achievable for a single-day Bay
+     Area hike (calibrated to ~20-25 miles / ~5,000-6,000 ft gain as the realistic upper bound), defaulting
+     to realistic when reasonable or ambiguous. Unrealistic → flat `RIDICULOUS_PREFERENCE_MESSAGE` ("Are
+     you serious? I cannot find a hiking place for that."), `route_signal="off_topic"` (reusing the same
+     hard-stop-this-turn signal as the location scope check — it doesn't literally mean off-topic, just
+     "end the turn now"), and `preferences_text` is *not* persisted, so the rejected preference is
+     forgotten rather than stuck permanently — the user can simply state a different one next turn. Only
+     runs when `preferences_text` actually changed from its prior value (not on every turn), to avoid
+     re-judging already-accepted preferences on every subsequent slot-filling turn.
+   - **Date realism check**: `_validate_hike_date()` rejects a resolved `YYYY-MM-DD` `hiking_date` if it's
+     in the past, more than `MAX_DATE_DAYS_AHEAD` (365, in `constants.py`) days out, or is *today* but the
+     current Pacific-time hour is past `SAME_DAY_CUTOFF_HOUR` (16, i.e. 4pm — not enough daylight left to
+     start a hike). A rejected date is cleared back to `None` (so routing treats it exactly like a
+     never-given date) and the reason is stashed in `date_rejection_reason`, which `ask_date` reads to
+     produce a tailored "that date won't quite work — {reason}" message instead of the generic first-ask
+     one (`ASK_DATE_AGAIN_TEMPLATE` vs `ASK_DATE_MESSAGE` in `prompts.py`). Unparseable/unresolved date
+     strings are left alone (not rejected) — this only fires once the extractor has resolved an actual
+     calendar date.
 3. Routing (`route_after_extract_slots`) — `route_signal=="off_topic"` (location rejected) → end turn; no
    date → `ask_date`; location given but not geocoded → `ask_location_clarification`; preferences not
    declined and topics still missing and `preferences_ask_count < MAX_PREFERENCE_ASKS` (3, in
@@ -172,11 +239,11 @@ build output from a prior `npm run build`; regenerate it with that command if `a
 and the built artifact matters.
 
 `app.js` key mechanics:
-- `API_KEY`/`API_URL` are read from `import.meta.env.API_KEY`/`API_URL` (populated by Vite's `define`
+- `API_KEY`/`API_URL`/`TURNSTILE_SITE_KEY` are read from `import.meta.env.*` (populated by Vite's `define`
   config from `frontend/.env`) — no longer hardcoded in source. `API_KEY` must match `BACKEND_API_KEY` in
   `backend/.env`; this is still a basic request-origin gate, not a real secret boundary, since the built
-  bundle embeds the value as a literal. `init()` shows a "Configuration error" bubble if `API_KEY` resolves
-  empty (e.g. `frontend/.env` missing or Vite not used to serve the page).
+  bundle embeds the value as a literal. `runApp()` shows a "Configuration error" bubble if `API_KEY`
+  resolves empty (e.g. `frontend/.env` missing or Vite not used to serve the page).
 - `session_id` is a `crypto.randomUUID()` generated once and stored in `sessionStorage` (so it survives
   page reloads within a tab but not across tabs/restarts) — this is the `thread_id` the backend checkpoints
   conversation state under.
@@ -186,11 +253,41 @@ and the built artifact matters.
   line; `final` renders a new assistant bubble, markdown via `marked.parse` if present; `error` renders a
   plain-text bubble).
 
+**Human-verification gate (Cloudflare Turnstile)**: `index.html` has a `#turnstile-gate` overlay shown on
+load, with the main `#app` chat UI starting `hidden`. The gate's own script tag —
+`<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onTurnstileLoad" defer>` — is
+the official Cloudflare-hosted script (no npm package; `@microsite/turnstile`, floated at one point, doesn't
+exist on the npm registry). It's listed in `index.html` *after* the `app.js` module script so that
+`window.onTurnstileLoad` (assigned at `app.js` module-evaluation time) is guaranteed to exist before
+Cloudflare's script invokes it — both deferred/module scripts execute in relative document order, so this
+ordering is load-bearing, don't reorder those two `<script>` tags.
+
+Flow: `onTurnstileLoad()` either skips straight to `unlockApp()` if `sessionStorage.human_verified` is
+already `"true"` (so a reload in the same tab doesn't re-challenge), or renders the widget via
+`turnstile.render(...)` with `TURNSTILE_SITE_KEY`. Its success callback (`verifyTurnstileToken`) POSTs the
+token to `POST /api/verify-turnstile` (with the same `X-API-Key` header as chat requests); on `{success:
+true}` it sets the `sessionStorage` flag and calls `unlockApp()` (hides the gate, shows `#app`, calls
+`runApp()`). This is a one-time-per-session gate, not per-message — Turnstile tokens are single-use/
+short-lived, so re-verifying on every chat message isn't the model here.
+
+**CSS gotcha already hit once, worth knowing before touching `.app`/`.gate` visibility**: the `hidden`
+attribute's default UA style (`[hidden] { display: none }`) has the *same specificity* as a class selector
+like `.app { display: flex }` — author stylesheets win specificity ties over the UA stylesheet, so setting
+`el.hidden = true` in JS silently does nothing if the element's class already sets its own `display`. Fixed
+via an explicit `.app[hidden], .gate[hidden] { display: none }` rule in `style.css`. If you add another
+toggled section styled with its own `display`, it needs the same `[hidden]` override or it'll render
+regardless of the `hidden` property.
+
 ## Environment variables
 
 `backend/.env`: `OPENAI_API_KEY`, `TAVILY_API_KEY`, `LANGSMITH_TRACING` / `LANGSMITH_PROJECT` /
 `LANGSMITH_API_KEY`, `QDRANT_PATH` (relative to `backend/`), `QDRANT_COLLECTION_NAME`, `BACKEND_API_KEY`
-(validates frontend requests — must match `API_KEY` below).
+(validates frontend requests — must match `API_KEY` below), `TURNSTILE_SECRET_KEY` (Cloudflare Turnstile
+secret, used server-side against the `siteverify` API — currently set to Cloudflare's "always passes"
+testing secret `1x0000000000000000000000000000000AA`; swap for a real secret before any real deployment).
 
 `frontend/.env`: `API_KEY` (must match `BACKEND_API_KEY` above), `API_URL` (backend chat endpoint, e.g.
-`http://localhost:8000/api/chat`). Read by `vite.config.js` at build/dev time, not by the browser directly.
+`http://localhost:8000/api/chat`), `TURNSTILE_SITE_KEY` (Cloudflare Turnstile site key for the widget —
+currently Cloudflare's testing sitekey `1x00000000000000000000AA`, which always passes and shows a visible
+"for testing only" watermark; swap for a real site key before any real deployment). Read by
+`vite.config.js` at build/dev time, not by the browser directly.

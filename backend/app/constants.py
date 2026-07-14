@@ -1,6 +1,13 @@
 MAX_ATTEMPTS = 4
 MAX_PREFERENCE_ASKS = 3
 
+RATE_LIMIT_PER_SECOND = 5
+
+MAX_DATE_DAYS_AHEAD = 365
+# Local (America/Los_Angeles) hour after which a same-day hike request is
+# considered too late to have enough daylight/time left.
+SAME_DAY_CUTOFF_HOUR = 16
+
 BAY_AREA_FALLBACK_LATLON = {"lat": 37.7749, "lon": -122.4194}
 
 PREFERENCE_TOPICS = {

@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     qdrant_collection_name: str = "hiking_docs"
 
     backend_api_key: str
+    turnstile_secret_key: str
 
     langsmith_tracing: bool = False
     langsmith_project: str = "HikingPlannerII"

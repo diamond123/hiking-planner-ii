@@ -2,15 +2,22 @@ const messagesEl = document.getElementById("messages");
 const statusEl = document.getElementById("status");
 const formEl = document.getElementById("chat-form");
 const inputEl = document.getElementById("chat-input");
+const appEl = document.getElementById("app");
+const gateEl = document.getElementById("turnstile-gate");
+const gateErrorEl = document.getElementById("gate-error");
 
 let API_KEY = "";
 let API_URL = "";
+let TURNSTILE_SITE_KEY = "";
+let TURNSTILE_VERIFY_URL = "";
 
 function loadApiConfig() {
   const env = (typeof import.meta !== "undefined" && import.meta.env) || {};
 
   API_KEY = env.API_KEY || "";
   API_URL = env.API_URL || "http://localhost:8000/api/chat";
+  TURNSTILE_SITE_KEY = env.TURNSTILE_SITE_KEY || "";
+  TURNSTILE_VERIFY_URL = API_URL.replace(/\/api\/chat$/, "/api/verify-turnstile");
 }
 
 function getSessionId() {
@@ -123,8 +130,64 @@ formEl.addEventListener("submit", (e) => {
   sendMessage(text);
 });
 
-async function init() {
-  loadApiConfig();
+function setGateError(text) {
+  gateErrorEl.textContent = text || "";
+}
+
+function unlockApp() {
+  gateEl.hidden = true;
+  appEl.hidden = false;
+  runApp();
+}
+
+async function verifyTurnstileToken(token) {
+  setGateError("");
+  try {
+    const resp = await fetch(TURNSTILE_VERIFY_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": API_KEY,
+      },
+      body: JSON.stringify({ token }),
+    });
+    const data = await resp.json().catch(() => ({}));
+
+    if (resp.ok && data.success) {
+      sessionStorage.setItem("human_verified", "true");
+      unlockApp();
+    } else {
+      setGateError("Verification failed. Please try again.");
+      if (window.turnstile) window.turnstile.reset();
+    }
+  } catch (err) {
+    setGateError("Could not reach the server to verify. Please try again.");
+    if (window.turnstile) window.turnstile.reset();
+  }
+}
+
+// Called by the Cloudflare Turnstile script once it has loaded (see the
+// `?onload=onTurnstileLoad` query param on its <script> tag in index.html).
+window.onTurnstileLoad = function () {
+  if (sessionStorage.getItem("human_verified") === "true") {
+    unlockApp();
+    return;
+  }
+
+  if (!TURNSTILE_SITE_KEY) {
+    setGateError("Configuration error: Turnstile site key was not found.");
+    return;
+  }
+
+  window.turnstile.render("#turnstile-container", {
+    sitekey: TURNSTILE_SITE_KEY,
+    callback: verifyTurnstileToken,
+    "error-callback": () => setGateError("Verification failed. Please try again."),
+    "expired-callback": () => setGateError("Verification expired. Please try again."),
+  });
+};
+
+function runApp() {
   if (!API_KEY) {
     setStatus("Configuration error");
     appendMessage("assistant", {
@@ -133,4 +196,4 @@ async function init() {
   }
 }
 
-init();
+loadApiConfig();

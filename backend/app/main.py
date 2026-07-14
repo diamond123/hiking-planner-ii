@@ -1,14 +1,16 @@
 import json
 import logging
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 
 from app.graph import compiled_graph
-from app.schemas import ChatRequest
+from app.rate_limit import enforce_rate_limit
+from app.schemas import ChatRequest, TurnstileVerifyRequest
 from app.security import verify_api_key
+from app.turnstile import verify_turnstile_token
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,7 +30,15 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/api/chat", dependencies=[Depends(verify_api_key)])
+@app.post("/api/verify-turnstile", dependencies=[Depends(enforce_rate_limit), Depends(verify_api_key)])
+async def verify_turnstile(req: TurnstileVerifyRequest, request: Request):
+    remote_ip = request.client.host if request.client else None
+    if not verify_turnstile_token(req.token, remote_ip):
+        raise HTTPException(status_code=403, detail="Human verification failed")
+    return {"success": True}
+
+
+@app.post("/api/chat", dependencies=[Depends(enforce_rate_limit), Depends(verify_api_key)])
 async def chat(req: ChatRequest):
     config = {"configurable": {"thread_id": req.session_id}}
     graph_input = {"messages": [HumanMessage(content=req.message)]}

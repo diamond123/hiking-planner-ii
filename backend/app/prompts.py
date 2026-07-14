@@ -43,7 +43,10 @@ EXTRACT_SLOTS_SYSTEM_PROMPT = """You are extracting hiking-planning details from
 user and a hiking planning assistant for the San Francisco Bay Area. Read the full conversation and extract:
 
 - hiking_date: the date the user wants to go hiking, if mentioned anywhere in the conversation.
-- location_text: a place name or area the user wants to hike near, if mentioned.
+- location_text: the bare place name or area the user wants to hike near, if mentioned. Strip out any \
+relational filler words like "near", "close to", "around", "by", or "next to" — extract only the place name \
+itself (e.g. from "close to san jose" extract "san jose", not "close to san jose"; from "near Mount Diablo" \
+extract "Mount Diablo", not "near Mount Diablo"). This is a geocoder input, so it must be a clean place name.
 - preferences_text: the user's hiking preferences (views, difficulty, elevation, distance, trail type, and/or no (other) preference, etc), \
 ONLY if the user proactively volunteered one, OR if the assistant already asked them about preferences \
 earlier in this conversation (look for an assistant message asking about location/views/difficulty/elevation/ \
@@ -62,6 +65,10 @@ ASK_DATE_MESSAGE = (
     "I'd love to help you plan a hike! What date are you thinking of going?"
 )
 
+ASK_DATE_AGAIN_TEMPLATE = (
+    "That date won't quite work — {reason}. What other date would you like to go hiking?"
+)
+
 ASK_PREFERENCES_MESSAGE = (
     "Do you have any other hike preferences, or should I pick a nice option for you?"
 )
@@ -70,6 +77,24 @@ ASK_LOCATION_CLARIFICATION_MESSAGE = (
     "I couldn't confidently place that location in the Bay Area trail search. "
     "Could you give me a nearby city, park, trail, or neighborhood to search around?"
 )
+
+PREFERENCE_REALISM_SYSTEM_PROMPT = """You are judging whether a user's stated hiking preferences are \
+physically achievable for a single-day hike in the San Francisco Bay Area. For reference, realistic Bay \
+Area day hikes top out at roughly 20-25 miles of distance and 5,000-6,000 feet of total elevation gain even \
+at the most extreme/strenuous end (the tallest Bay Area peaks, like Mount Diablo or Mount Tamalpais, only \
+have a few thousand feet of gain from their trailheads). Default to is_realistic=true for anything \
+reasonable or ambiguous — only set is_realistic=false for preferences that are clearly impossible or absurd \
+for a single-day Bay Area hike, such as:
+- Distances far beyond a day hike (e.g. 100+ miles).
+- Elevation gains far beyond anything in the region (e.g. 10,000+ feet).
+- Nonsensical or physically meaningless descriptors (e.g. "extremely dark view", requests for underwater or \
+off-planet trails).
+
+Do not flag ordinary preferences like "long hike", "steep", "great views", "moderate difficulty", or \
+specific-but-plausible numbers (e.g. "10 miles", "2000 feet of elevation gain").
+"""
+
+RIDICULOUS_PREFERENCE_MESSAGE = "Are you serious? I cannot find a hiking place for that."
 
 WEATHER_JUDGE_SYSTEM_PROMPT = """You are judging whether weather conditions are suitable for hiking, based on \
 web search results. Default to ok=true when the evidence is inconclusive or the search results don't clearly \
