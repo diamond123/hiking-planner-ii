@@ -71,7 +71,7 @@ function scheduleInactivityNudge() {
 function showInactivityNudge() {
   const canRepeat = lastAssistantText && lastAssistantText.length <= REPEAT_QUESTION_MAX_LENGTH;
   const text = canRepeat
-    ? `Are you still there? Just checking back in — ${lastAssistantText}`
+    ? `Are you still there? Just checking back in — ${lastAssistantText.replace(/^Great, got it. /, "")}`
     : "Are you still there?";
   appendMessage("assistant", { text, nudge: true });
   inactivityTimer = setTimeout(endSessionDueToInactivity, INACTIVITY_END_MS);
