@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Generated graph diagram (scripts/draw_graph.py)
+graph.png
