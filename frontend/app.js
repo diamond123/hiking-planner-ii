@@ -13,6 +13,27 @@ let TURNSTILE_SITE_KEY = "";
 let TURNSTILE_VERIFY_URL = "";
 let END_SESSION_URL = "";
 
+// Mobile browsers report `100vh`/`100dvh` based on the layout viewport, which
+// doesn't shrink when the on-screen keyboard opens - only the *visual*
+// viewport does. Without this, opening the keyboard pushes the whole fixed-
+// height app column upward instead of shrinking it, shoving the chat history
+// off-screen above the input. `--app-height` tracks the real visible height
+// and wins over the `dvh` fallback in style.css.
+function updateAppHeight() {
+  const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  document.documentElement.style.setProperty("--app-height", `${height}px`);
+}
+
+updateAppHeight();
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", () => {
+    updateAppHeight();
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  });
+} else {
+  window.addEventListener("resize", updateAppHeight);
+}
+
 function loadApiConfig() {
   const env = (typeof import.meta !== "undefined" && import.meta.env) || {};
 
@@ -246,6 +267,14 @@ formEl.addEventListener("submit", (e) => {
   if (!text) return;
   inputEl.value = "";
   sendMessage(text);
+});
+
+inputEl.addEventListener("focus", () => {
+  // Give the keyboard's open animation (and the resulting visualViewport
+  // resize) a moment to finish before re-checking scroll position.
+  setTimeout(() => {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }, 300);
 });
 
 document.querySelectorAll(".example-chip").forEach((chip) => {

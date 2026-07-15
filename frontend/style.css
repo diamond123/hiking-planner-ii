@@ -15,6 +15,11 @@
 html, body {
   height: 100%;
   margin: 0;
+  /* Prevent the whole document from scrolling/bouncing on mobile; only
+     .messages should scroll. Without this, a rubber-band scroll on iOS can
+     shift the fixed-height .app column and hide the header behind the
+     address bar. */
+  overflow: hidden;
 }
 
 body {
@@ -30,10 +35,22 @@ body {
   display: none;
 }
 
-.app {
+.app,
+.gate {
   width: 100%;
-  max-width: 720px;
+  /* `100vh` is the *largest* possible viewport on mobile browsers (address
+     bar collapsed), so it overflows the actually-visible area whenever the
+     address bar is showing, pushing the header out of view. `dvh` tracks the
+     real visible viewport as the address bar/keyboard show and hide.
+     `--app-height` (set in app.js from the `visualViewport` API) is the most
+     reliable of the three and wins last for browsers that support it. */
   height: 100vh;
+  height: 100dvh;
+  height: var(--app-height, 100dvh);
+}
+
+.app {
+  max-width: 720px;
   display: flex;
   flex-direction: column;
   background: var(--panel);
@@ -42,8 +59,6 @@ body {
 }
 
 .gate {
-  width: 100%;
-  height: 100vh;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -77,9 +92,11 @@ body {
 
 .app-header {
   padding: 16px 20px;
+  padding-top: max(16px, env(safe-area-inset-top));
   border-bottom: 1px solid var(--border);
   background: var(--accent);
   color: white;
+  flex-shrink: 0;
 }
 
 .app-header h1 {
@@ -130,7 +147,12 @@ body {
 
 .messages {
   flex: 1;
+  /* Without min-height: 0, a flex child that's also a scroll container won't
+     shrink below its content size in some mobile browsers, so it grows past
+     the .app column instead of scrolling internally. */
+  min-height: 0;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   padding: 16px 20px;
   display: flex;
   flex-direction: column;
@@ -214,7 +236,9 @@ body {
   display: flex;
   gap: 8px;
   padding: 16px 20px;
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 .chat-form input {
