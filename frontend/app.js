@@ -5,6 +5,7 @@ const inputEl = document.getElementById("chat-input");
 const appEl = document.getElementById("app");
 const gateEl = document.getElementById("turnstile-gate");
 const gateErrorEl = document.getElementById("gate-error");
+const examplesEl = document.getElementById("examples");
 
 let API_KEY = "";
 let API_URL = "";
@@ -111,6 +112,7 @@ function clearHistoryClearTimer() {
 function clearMessageHistory() {
   clearHistoryClearTimer();
   messagesEl.innerHTML = "";
+  examplesEl.hidden = false;
 }
 
 function startNewSession() {
@@ -148,6 +150,7 @@ function setStatus(text) {
 }
 
 async function sendMessage(text) {
+  examplesEl.hidden = true;
   clearInactivityTimer();
   if (historyClearTimer) {
     // A prior session ended and its messages were just left on screen for
@@ -222,7 +225,13 @@ function handleEvent(evt) {
     setStatus("");
     lastAssistantText = evt.markdown || "";
     appendMessage("assistant", { markdown: evt.markdown });
-    scheduleInactivityNudge();
+    if (evt.plan_complete) {
+      // The hike plan is done - there's no pending question to nudge about,
+      // so don't arm the "Are you still there?" timer.
+      clearInactivityTimer();
+    } else {
+      scheduleInactivityNudge();
+    }
   } else if (evt.type === "error") {
     setStatus("");
     lastAssistantText = evt.text || "";
@@ -237,6 +246,12 @@ formEl.addEventListener("submit", (e) => {
   if (!text) return;
   inputEl.value = "";
   sendMessage(text);
+});
+
+document.querySelectorAll(".example-chip").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    sendMessage(chip.textContent);
+  });
 });
 
 function setGateError(text) {

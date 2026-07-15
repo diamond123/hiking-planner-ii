@@ -61,13 +61,20 @@ async def chat(req: ChatRequest):
                     final_state = chunk
 
             markdown = None
+            plan_complete = False
             if final_state:
                 markdown = final_state.get("final_markdown")
+                plan_complete = bool(markdown)
                 if not markdown and final_state.get("messages"):
                     markdown = final_state["messages"][-1].content
 
             yield json.dumps(
-                {"type": "final", "markdown": markdown or "", "session_id": req.session_id}
+                {
+                    "type": "final",
+                    "markdown": markdown or "",
+                    "session_id": req.session_id,
+                    "plan_complete": plan_complete,
+                }
             ) + "\n"
         except Exception:
             logger.exception("chat graph failed for session %s", req.session_id)

@@ -41,6 +41,7 @@ from app.prompts import (
     GUARDRAIL_SYSTEM_PROMPT,
     NO_CANDIDATES_MESSAGE,
     LOCATION_SCOPE_REJECTION_MESSAGE,
+    PLAN_READY_MESSAGE,
     PREFERENCE_REALISM_SYSTEM_PROMPT,
     REFUSAL_MESSAGE,
     RIDICULOUS_PREFERENCE_MESSAGE,
@@ -146,6 +147,52 @@ def _is_no_preference(preferences_text: str | None) -> bool:
     return any(lowered.find(variant) != -1 for variant in no_pref_variants)
 
 
+# Colloquial "I don't care" phrasings, checked directly against the user's raw
+# reply text - deliberately broader than _is_no_preference()'s literal-phrase
+# check, which only matches what EXTRACT_SLOTS_SYSTEM_PROMPT asks the LLM to
+# normalize preferences_text to ("no specific preference"). Relying on that
+# normalization alone is flaky: the LLM doesn't always comply verbatim, which
+# left a reply like "anything is fine" unrecognized by both _is_no_preference()
+# and the keyword-based topic tracker, causing ask_preferences to repeat the
+# same question.
+NO_PREFERENCE_REPLY_PHRASES = (
+    "no preference",
+    "no preferences",
+    "no specific preference",
+    "no specific preferences",
+    "no other preference",
+    "no other preferences",
+    "no strong preference",
+    "no strong preferences",
+    "anything is fine",
+    "anything works",
+    "anything's fine",
+    "anything goes",
+    "whatever works",
+    "whatever is fine",
+    "whatever's fine",
+    "don't care",
+    "dont care",
+    "doesn't matter",
+    "doesnt matter",
+    "not picky",
+    "i'm flexible",
+    "im flexible",
+    "you pick",
+    "you choose",
+    "your choice",
+    "surprise me",
+    "up to you",
+)
+
+
+def _reply_indicates_no_preference(text: str | None) -> bool:
+    if not text:
+        return False
+    lowered = text.strip().lower()
+    return any(phrase in lowered for phrase in NO_PREFERENCE_REPLY_PHRASES)
+
+
 def _validate_hike_date(hiking_date: str) -> str | None:
     """Return a rejection reason if the date isn't realistic, else None."""
     try:
@@ -220,6 +267,16 @@ def guardrail(state: HikingState) -> dict:
 
 
 def extract_slots(state: HikingState) -> dict:
+    # Topics ask_preferences just asked about last turn, if any - captured
+    # before recomputation below so a deterministic "I don't care" reply can
+    # resolve exactly those, regardless of what the LLM extractor did with
+    # preferences_text.
+    prior_missing_topics = set(state.get("missing_preference_topics") or [])
+    latest_message = state["messages"][-1] if state.get("messages") else None
+    latest_user_text = (
+        latest_message.content if isinstance(latest_message, HumanMessage) else None
+    )
+
     slots = None
     if not state.get("hiking_date") or not state.get("location_text") or \
         not state.get("preferences_text") or state.get('missing_preference_topics'):
@@ -281,6 +338,37 @@ def extract_slots(state: HikingState) -> dict:
         if _is_no_preference(preferences_text)
         else [t for t in PREFERENCE_TOPIC_ORDER if t in ALL_PREFERENCE_TOPICS - known_topics]
     )
+
+    # Deterministic backstop, mirroring the no-preference one below: a short
+    # colloquial reply like "something easy" or "moderate" directly names one
+    # of the topics that was just asked about via PREFERENCE_TOPICS' own
+    # keywords, but the LLM's combined preferences_text doesn't always end up
+    # containing a matching keyword (e.g. it may paraphrase or drop it), which
+    # left the keyword-based topic tracker blind to an answer that plainly
+    # satisfied the question and caused ask_preferences to repeat itself.
+    if prior_missing_topics:
+        reply_topic_matches = _extract_known_preference_topics(latest_user_text) & prior_missing_topics
+        if reply_topic_matches:
+            logger.info(
+                "deterministic keyword reply resolved topics %s: %r",
+                sorted(reply_topic_matches), latest_user_text,
+            )
+            known_topics |= reply_topic_matches
+            missing_topics = [t for t in missing_topics if t not in reply_topic_matches]
+            if latest_user_text and (
+                not preferences_text or latest_user_text.lower() not in preferences_text.lower()
+            ):
+                preferences_text = (
+                    f"{preferences_text}, {latest_user_text}" if preferences_text else latest_user_text
+                )
+
+    if prior_missing_topics and _reply_indicates_no_preference(latest_user_text):
+        logger.info(
+            "deterministic no-preference reply resolved topics %s: %r",
+            sorted(prior_missing_topics), latest_user_text,
+        )
+        missing_topics = [t for t in missing_topics if t not in prior_missing_topics]
+
     preferences_ask_count = state.get("preferences_ask_count", 0)
 
     # Stop asking for additional preferences after two asks.
@@ -364,6 +452,7 @@ def ask_preferences(state: HikingState) -> dict:
 
 
 def ask_location_clarification(state: HikingState) -> dict:
+    state["location_text"] = None # reset location text
     return {"messages": [AIMessage(content=ASK_LOCATION_CLARIFICATION_MESSAGE)]}
 
 
@@ -442,11 +531,16 @@ def check_trail(state: HikingState) -> dict:
         state.get("location_text"),
         state["hiking_date"],
     )
+    judge_input = (
+        f"Trail/park being evaluated: {md['title']}\n"
+        f"Hiking date: {state['hiking_date']}\n\n"
+        f"Search results:\n{raw_text}"
+    )
     judgment = condition_judge_llm.invoke(
-        [SystemMessage(content=TRAIL_JUDGE_SYSTEM_PROMPT), HumanMessage(content=raw_text)]
+        [SystemMessage(content=TRAIL_JUDGE_SYSTEM_PROMPT), HumanMessage(content=judge_input)]
     )
     if not judgment.ok:
-        logger.info("Trail judgment: bad")
+        logger.info(f"Trail judgment: bad (source={md['source']}, attempt={state['attempt_count']})")
     return {"trail_result": {"ok": judgment.ok, "reason": judgment.reason, "raw": raw_text}}
 
 
@@ -470,5 +564,5 @@ def generate_plan(state: HikingState) -> dict:
     response = plan_writer_llm.invoke(
         [SystemMessage(content=GENERATE_PLAN_SYSTEM_PROMPT), HumanMessage(content=human_content)]
     )
-    markdown = str(response.content)
+    markdown = f"{PLAN_READY_MESSAGE}\n\n{response.content}"
     return {"final_markdown": markdown, "messages": [AIMessage(content=markdown)]}

@@ -106,12 +106,21 @@ date, such as severe storms, extreme heat/cold warnings, flooding, red flag fire
 Summarize the conditions found in one to two sentences.
 """
 
-TRAIL_JUDGE_SYSTEM_PROMPT = """You are judging whether a specific trail/park is currently open and safe to \
-hike, based on web search results about its conditions, closures, or maintenance. Default to ok=true when the \
-evidence is inconclusive or doesn't mention closures/hazards. Only set ok=false for clear indications the \
-trail or park is closed, under active fire/flood/hazard advisory, or undergoing maintenance that blocks \
-access. Summarize the conditions found in one to two sentences.
+TRAIL_JUDGE_SYSTEM_PROMPT = """You are judging whether a specific named trail/park (given below) will be open \
+and safe to hike on the given hiking date, based on web search results about its conditions, closures, or \
+maintenance. The search results often come from park-system pages that bundle alerts for many different \
+parks/trails together (e.g. a district-wide "Alerts and Closures" page) - only treat a closure, advisory, or \
+hazard as relevant if it clearly names the specific trail/park you were asked about; ignore closures that name \
+a different trail or park, even if they appear in the same search result. The results may also be undated, \
+stale, or describe a closure/advisory from a different time period than the hiking date - weigh that when \
+deciding whether a mentioned issue still applies. Default to ok=true when the evidence is inconclusive, \
+undated, about a different trail/park, or doesn't clearly indicate the named trail will still be affected on \
+the hiking date. Only set ok=false for clear indications that the specific named trail or park will be closed, \
+under active fire/flood/hazard advisory, or undergoing maintenance that blocks access, at the time of the \
+hiking date. Summarize the conditions found in one to two sentences.
 """
+
+PLAN_READY_MESSAGE = "## 🥾 Here you go!\n\n---"
 
 GENERATE_PLAN_SYSTEM_PROMPT = """You are a hiking planning assistant for the San Francisco Bay Area. You are \
 given the full text content of a trail guide document, plus the user's preferences, the hiking date, weather \
@@ -123,6 +132,11 @@ A short, appealing summary of the hike (2-4 sentences) tailored to what the user
 ## Trail Sequence
 A clear step-by-step trail sequence / directions derived from the document (use a numbered or bulleted list).
 
+## Parking
+A short note on parking / trailhead access, drawn from the document (e.g. its "Getting there" section) - \
+where to park, any fees, or lot size/availability notes if mentioned. If the document doesn't mention \
+parking, say parking information wasn't available for this trail.
+
 ## Weather Conditions
 A short note on the weather conditions for the hiking date.
 
@@ -130,7 +144,8 @@ A short note on the weather conditions for the hiking date.
 A short note on trail/park conditions (closures, maintenance, etc).
 
 Only use information present in the provided document and condition summaries — do not invent trail names, \
-distances, or facts not supported by the source material. Keep the whole thing concise and easy to scan.
+distances, parking details, or facts not supported by the source material. Keep the whole thing concise and \
+easy to scan.
 """
 
 WEATHER_BAD_TEMPLATE = (

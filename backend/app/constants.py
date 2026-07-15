@@ -1,5 +1,5 @@
-MAX_ATTEMPTS = 4
-MAX_PREFERENCE_ASKS = 3
+MAX_ATTEMPTS = 8
+MAX_PREFERENCE_ASKS = 2
 
 RATE_LIMIT_PER_SECOND = 5
 
@@ -11,7 +11,14 @@ SAME_DAY_CUTOFF_HOUR = 16
 BAY_AREA_FALLBACK_LATLON = {"lat": 37.7749, "lon": -122.4194}
 
 PREFERENCE_TOPICS = {
-    "views": ["view", "views", "scenic", "waterfall", "ocean", "lake", "sunset"],
+    "views": [
+        "view", "views", "vista", "vistas", "scenic", "scenery", "panorama", "panoramic",
+        "overlook", "overlooks", "lookout", "skyline", "cityscape",
+        "waterfall", "waterfalls", "ocean", "coast", "coastal", "shoreline", "bay view",
+        "lake", "sunset", "sunrise",
+        "forest", "forested", "tree", "trees", "redwood", "redwoods",
+        "meadow", "meadows", "wildflower", "wildflowers", "canyon",
+    ],
     "difficulty": ["easy", "moderate", "hard", "challenging", "beginner", "strenuous"],
     "elevation_gain": ["elevation", "gain", "climb", "steep", "vert"],
     "distance": ["mile", "miles", "km", "kilometer", "distance", "short", "long"],

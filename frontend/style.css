@@ -93,6 +93,41 @@ body {
   opacity: 0.9;
 }
 
+.examples {
+  padding: 14px 20px 0;
+}
+
+.examples[hidden] {
+  display: none;
+}
+
+.examples-label {
+  margin: 0 0 8px 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.example-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.example-chip {
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--accent-light);
+  color: var(--accent);
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.example-chip:hover {
+  background: var(--border);
+}
+
 .messages {
   flex: 1;
   overflow-y: auto;
@@ -145,6 +180,12 @@ body {
 .msg.assistant.plan h2:first-child,
 .msg.assistant.plan h3:first-child {
   margin-top: 0;
+}
+
+.msg.assistant.plan hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0.8em 0 1em;
 }
 
 .msg.assistant.plan ul,

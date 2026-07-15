@@ -8,7 +8,7 @@ _client = QdrantClient(path=settings.qdrant_full_path)
 _embeddings = OpenAIEmbeddings(model=settings.embedding_model, api_key=settings.openai_api_key)
 
 MILES_TO_METERS = 1609.34
-GEO_RADIUS_MILES = 50
+GEO_RADIUS_MILES = 15
 
 
 def search_chunk(
@@ -41,9 +41,21 @@ def search_chunk(
         collection_name=settings.qdrant_collection_name,
         query=vector,
         query_filter=query_filter,
-        limit=1,
+        limit=6,
     ).points
 
     if not results:
         return None
-    return results[0].payload
+    
+    # L3 Norm
+    scores = {}
+    bestScore, bestIndex = 0, -1
+    for i, result in enumerate(results):
+        score = result.score
+        source = result.payload.get('metadata').get('source')
+        scores[source] = scores.get(source, 0) + score ** 3
+        if scores[source] > bestScore:
+            bestScore = scores[source]
+            bestIndex = i
+
+    return results[bestIndex].payload if bestIndex >= 0 else None
