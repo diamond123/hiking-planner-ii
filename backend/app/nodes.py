@@ -559,10 +559,11 @@ def generate_plan(state: HikingState) -> dict:
         address = reverse_geocode_latlon(float(lat), float(lon))
         gps_info = (
             f"Address: {address or 'not available'}\n"
-            f"[Google Maps link to trailhead](https://www.google.com/maps/search/?api=1&query={lat},{lon})"
+            f"<a href=\"https://www.google.com/maps/search/?api=1&query={lat},{lon}\" target=\"_blank\">Google Maps link to starting point</a>"
+            # f"[Google Maps link to starting point](https://www.google.com/maps/search/?api=1&query={lat},{lon})"
         )
     else:
-        gps_info = "Address: not available\nGoogle Maps link to trailhead: not available"
+        gps_info = "Address: not available\nGoogle Maps link to starting point: not available"
 
     human_content = (
         f"Trail: {md['title']}\n"

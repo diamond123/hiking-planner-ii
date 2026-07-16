@@ -355,6 +355,14 @@ padding on `.app-header`/`.chat-form` so they clear notches/home indicators) and
 layout viewport around the keyboard directly, making the JS fallback redundant there but harmless
 elsewhere).
 
+**Refocus-vs-blur on response completion**: `sendMessage()`'s `finally` block normally calls
+`inputEl.focus()` after every response, so the user can keep typing without re-tapping the input. On
+mobile this reopens the virtual keyboard, which covers the very plan text the user just asked to read.
+`handleEvent()` sets a module-level `planJustCompleted` flag to `true` when a `"final"` event has
+`plan_complete: true` (and resets it to `false` at the top of `sendMessage()`, before the next request goes
+out); the `finally` block checks it and calls `inputEl.blur()` instead of `.focus()` in that case only —
+ordinary slot-filling responses (a pending question) still refocus as before.
+
 **Example prompt chips**: `#examples` in `index.html`, right below the header and above `#messages` — a
 handful of clickable sample requests (e.g. "Find a hiking place in south San Jose with lots of trees").
 Clicking one calls `sendMessage()` directly with that chip's text, same as typing it and hitting send.
