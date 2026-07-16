@@ -291,9 +291,9 @@ comes transitively via `langchain`/`langgraph`).
 
 `index.html` + `style.css` + `app.js` (loaded as an ES module), plus `marked.js` loaded from a CDN
 `<script>` tag for markdown rendering (`marked.parse(...)`). Vite (`vite.config.js`, `package.json`) is now
-a required dev/build dependency — see the Commands section above for why. `frontend/dist/` is committed
-build output from a prior `npm run build`; regenerate it with that command if `app.js`/`index.html` change
-and the built artifact matters.
+a required dev/build dependency — see the Commands section above for why. `frontend/dist/` is gitignored,
+not committed — it's build output, regenerated locally by `npm run build` before every `vercel --prod`
+deploy (see Deployment below), not something to check in.
 
 `app.js` key mechanics:
 - `API_KEY`/`API_URL`/`TURNSTILE_SITE_KEY` are read from `import.meta.env.*` (populated by Vite's `define`
@@ -362,6 +362,17 @@ mobile this reopens the virtual keyboard, which covers the very plan text the us
 `plan_complete: true` (and resets it to `false` at the top of `sendMessage()`, before the next request goes
 out); the `finally` block checks it and calls `inputEl.blur()` instead of `.focus()` in that case only —
 ordinary slot-filling responses (a pending question) still refocus as before.
+
+**Scroll-to-top on a completed plan**: `appendMessage()` normally does `messagesEl.scrollTop =
+messagesEl.scrollHeight` after appending a bubble, so the latest message is visible at the bottom — correct
+for short slot-filling replies. A completed plan's markdown bubble is routinely taller than the whole
+viewport on a phone, so scrolling to the bottom left the "Here you go!" heading and summary scrolled out of
+view above the fold, with only the tail end of the plan showing. `appendMessage()` now branches on whether
+`markdown` was passed (every `final`-event bubble, not just `plan_complete: true` ones, since the backend
+always sends `markdown` on `final` — see the `/api/chat` response shape above): if so, it calls
+`bubble.scrollIntoView({ block: "start" })` instead, landing the top of the new bubble at the top of
+`#messages` rather than jumping to its bottom. Ordinary short text bubbles (`text`, no `markdown`) keep the
+scroll-to-bottom behavior.
 
 **Example prompt chips**: `#examples` in `index.html`, right below the header and above `#messages` — a
 handful of clickable sample requests (e.g. "Find a hiking place in south San Jose with lots of trees").

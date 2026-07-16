@@ -167,7 +167,7 @@ function appendMessage(role, { text, markdown, nudge } = {}) {
     // plan bubble is visible instead of jumping straight to its bottom
     // (which scrollTop = scrollHeight would do), so small screens don't
     // land mid-plan with the summary already scrolled out of view.
-    bubble.scrollIntoView({ block: "start" });
+    bubble.scrollIntoView({ behavior: "smooth", block: "start" });
   } else {
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
