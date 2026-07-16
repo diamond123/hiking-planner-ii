@@ -58,7 +58,7 @@ I'm used to them and they are convenient and free.
 
 - Any other components you need:
 
-Use Cloudflare Turnstile (https://github.com/diamond123/hiking-planner-ii/blob/main/backend/app/turnstile.py#L12) prevent nonhuman access. 
+Use Cloudflare Turnstile [here](https://github.com/diamond123/hiking-planner-ii/blob/main/backend/app/turnstile.py#L12) prevent nonhuman access. 
 
 A Sqlite3 Database to store parent documents.
 
@@ -86,7 +86,7 @@ It works as follows:
 
 Backend code is [here](https://github.com/diamond123/hiking-planner-ii/tree/main/backend/app)
 
-data is [here](https://github.com/diamond123/hiking-planner-ii/tree/main/backend/qdrant_data)
+Data is [here](https://github.com/diamond123/hiking-planner-ii/tree/main/backend/qdrant_data)
 
 Frontend code is [here](https://github.com/diamond123/hiking-planner-ii/tree/main/frontend)
 
