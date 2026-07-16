@@ -1,63 +1,80 @@
-### Poject Idea
-Hiking Planner
+## Project Idea
 
-I'm living in san franciso bay area and we often go hiking on weekend to enjoy good weather. We have a hiking group and we regularly organize hiking events. One of organizer's task is to propose a hiking plan according to preferences of most group members, and remember hiking route, check weather conditions and trail conditions, and at the end, lead the group to hike safely. I would like AI can take part of organizer role by proposing a plan, generating a trip summary, check weather and trail conditions, and send out the final schedule.
+**Hiking Planner**
 
-Can ChatGpt do it? Partly yes. Once I asked ChatGpt with "can you give me a 6-mile hiking trip near north San Jose with greaet ocean view?", then ChatGpt recommended a few tours which look nice at first glance. ChatGpt then printed out a trail sequence for a tour when I asked. Then I checked the trail sequence on map and found out they were wrong. It says when arriving the intersection of trail A & trail B, turn left to trail B. And on map, trail A and trail B are not connected!
+I live in the San Francisco Bay Area, and we often go hiking on weekends to enjoy the good weather. We have a hiking group and regularly organize hiking events. One of the organizer's tasks is to propose a hiking plan based on the preferences of most group members, remember the hiking route, check weather and trail conditions, and ultimately lead the group on a safe hike. I would like AI to take on part of the organizer's role by proposing a plan, generating a trip summary, checking weather and trail conditions, and sending out the final schedule.
+
+Can ChatGPT do it? Partly, yes. Once I asked ChatGPT, "Can you give me a 6-mile hiking trip near north San Jose with great ocean views?" ChatGPT recommended a few tours that looked nice at first glance. It then printed out a trail sequence for one of the tours when I asked. When I checked the trail sequence on a map, I found it was wrong: it said that upon arriving at the intersection of Trail A and Trail B, I should turn left onto Trail B — but on the map, Trail A and Trail B aren't even connected!
 
 ## Solution
-There are a lot of hiking reports / reviews on web. At fist I want to use llm to scan those reports and extract hiking trails information and use them to generate hiking routes, but I found it is either out of scope of llm or too hard to sove. For this class project,I reduced the complexity to just search those reports and retrieve one that meet our requirement best, then we can use llm to generate a summary, extract trail sequnece and so on. Becuase there is no new route created, the trail sequence is 100% from the report and therefore should be accurate (because I know which data source is reliable based on my hiking experience).
+
+There are a lot of hiking reports and reviews on the web. At first, I wanted to use an LLM to scan those reports, extract hiking trail information, and use it to generate hiking routes. However, I found that this was either out of scope for an LLM or too difficult to solve. For this class project, I reduced the complexity to simply searching those reports and retrieving the one that best meets our requirements, then using an LLM to generate a summary, extract the trail sequence, and so on. Because no new route is created, the trail sequence comes 100% from the report and should therefore be accurate (since I know which data sources are reliable based on my own hiking experience).
 
 ## Audience
-Day hikers living in San Francisco Bay Area.
+
+Day hikers living in the San Francisco Bay Area.
 
 ### Task 1: Defining Problem, Audience, and Scope
-the problem and audence are as above. I limit this project to just existing hiking tours around San Francisco Bay Area.
+
+The problem and audience are as described above. I've limited this project to existing hiking tours around the San Francisco Bay Area.
 
 ### Task 2: Propose a Solution
-Crawling hiking reports from websites whose contents are reliable based on my experience. Use them to create a RAG application, which basically a chat app. Users can post request like "find a hiking route for me near Sunnyvale", "I heard there is a hiking trail leading to a cave. Can you find it for me?", "What is a good place to hike during winter?". The app searches its database, finds ra ecord matching user's request best and sends to llm to generate a summary, trail sequence, parking information and so on.
+
+Crawl hiking reports from websites whose content is reliable based on my experience. Use them to create a RAG application — essentially a chat app. Users can post requests like "Find a hiking route for me near Sunnyvale," "I heard there's a hiking trail leading to a cave — can you find it for me?" or "What's a good place to hike during winter?" The app searches its database, finds the record that best matches the user's request, and sends it to an LLM to generate a summary, trail sequence, parking information, and so on.
 
 ### Task 3: Dealing with the Data
-Crawling hiking reports from websites whose contents are reliable based on my experience. Split each reports (in html) to smaller chunks and save them to QDrantVectorStore as we learnt in the class.
+
+Crawl hiking reports from websites whose content is reliable based on my experience. Clean, extract content from each report and split them into smaller chunks and save them to a Qdrant vector store, as we learned in class.
 
 ### Task 4: Building an End-to-End Agentic RAG Prototype
-Please refer to [LangGraph diagram](https://github.com/diamond123/hiking-planner-ii/blob/main/backend/graph.png) for a diagram of this RAG application.
-It works as follows.
-- user posts a request like "find a hiking route for me near Sunnyvale".
-- check if there is enough information for planning, including hiking date, preferred location, perferred view, total distance, difficulty level etc.
-- if not, or preferences are incorrect (e.g. a hiking date in the past, unrealistic elevation gain), ask user to provide or re-enter those info. (for now, hiking date and preferred location are required)
-- Check weather conditions for the date and location. If Weather is bad, ask user to choose another date or location.
-- Search QDrantVectorStore to find chunks that best matches user's requests.
-- Retreive the original hiking report using the chunk's metadata (So the chunks need to keep their origin in metadata) (*This is important* because we need to make sure the hiking plan workable and the trail sequence correct. no mistake is allowed.)
-- Check trail conditions using TavilySearch and llm judge to see if it is OK to hike.
-- If the trail condtions do not allow to hike (such as trail closure), go back to Search QDrantVectorStore to find next best option.
-- The total attempt should be limitted (<=4 times). If no hiking tours are available, just let users know.
-- If everything is good, send the original hiking report, weather and trail conditions information to llm to generate a final plan
+
+Please refer to the [LangGraph diagram](https://github.com/diamond123/hiking-planner-ii/blob/main/backend/graph.png) for a diagram of this RAG application.
+
+It works as follows:
+1. The user posts a request like "Find a hiking route for me near Sunnyvale."
+2. Check whether there's enough information for planning, including hiking date, preferred location, preferred views, total distance, difficulty level, etc.
+3. If not, or if the given preferences are invalid (e.g., a hiking date in the past, an unrealistic elevation gain), ask the user to provide or re-enter that information. (For now, hiking date and preferred location are required.)
+4. Check weather conditions for the date and location. If the weather is bad, ask the user to choose another date or location.
+5. Search the Qdrant vector store to find chunks that best match the user's request.
+6. Retrieve the original hiking report using the chunk's metadata (so the chunks need to retain their origin in metadata). *This is important* because we need to make sure the hiking plan is workable and the trail sequence is correct — no mistakes are allowed.
+7. Check trail conditions using Tavily Search and an LLM judge to determine whether it's OK to hike.
+8. If trail conditions don't allow hiking (e.g., a trail closure), go back step 5 to search the Qdrant vector store for the next-best option (exclude the previous tours when dong the search).
+9. Limit the total number of attempts (≤ 4). If no hiking tours are available, let the user know.
+10. If everything checks out, send the original hiking report (not the chunks) along with the weather and trail conditions information to an LLM to generate a final plan.
 
 ### Task 5: Evals
-We can use RAGAS to evaluate the RAG. But as I'm doing this project, I found it is not a standard RAG, because there is no much connections among chunks, and all chunks are similar at some level. E.g. if user's request is a general one like "find me a place to hike 5 miles with great view", then almost all chunks give similarity scores which are just slightly different.
 
-As a hiking plan, accuracy is very important. I used RAGAS to evalute a few aspects such as context recall, failthfulness, answer accuracy, noise sensitivity as following. I think there is some setup issues with RAGAS to generate test dataset. the answer_accuracy is obiviously wrong. I don't have enough time to investigate it further. Anyway, the fithfulness is high which is what I want (we don't want a hiking plan that does not work)
+We can use RAGAS to evaluate the RAG. However, while working on this project, I found that this isn't a standard RAG use case, because there are few connections among chunks, and all chunks are similar to some degree. For example, if a user's request is general — like "find me a place to hike 5 miles with great views" — then almost all chunks receive similarity scores that differ only slightly.
 
-testset:
+For a hiking plan, accuracy is very important. I used RAGAS to evaluate a few aspects, such as context recall, faithfulness, answer accuracy, and noise sensitivity, as shown below. I believe there's some setup issue with RAGAS's test dataset generation — the answer_accuracy score is clearly wrong, and I haven't had time to investigate further. That said, faithfulness is high, which is what I want (we don't want a hiking plan that doesn't actually work).
+
+**Test set:**
+
 | user_input | response | reference |
-| --- | --- | --- | --- |
-| How do I get to the Lagooon Area at Miller/Kno... | ### Summary:\nThe document describes a 4.9-mil... | The Lagoon Area at Miller/Knox Regional Shorel... | 
-| Where is Hakw Hill and how long is the loop hike? | ### Summary of Lost Trail, Windy Hill Open Spa... | Hawk Hill is in the Golden Gate National Recre... | 
-| What is the trail sequence for the 4.25 mile M... | ### Summary of Villa Montalvo Hike\nThe Villa ... | The 4.25 mile loop hike starts from the north ... | 
+| --- | --- | --- |
+| How do I get to the Lagooon Area at Miller/Kno... | ### Summary:\nThe document describes a 4.9-mil... | The Lagoon Area at Miller/Knox Regional Shorel... |
+| Where is Hakw Hill and how long is the loop hike? | ### Summary of Lost Trail, Windy Hill Open Spa... | Hawk Hill is in the Golden Gate National Recre... |
+| What is the trail sequence for the 4.25 mile M... | ### Summary of Villa Montalvo Hike\nThe Villa ... | The 4.25 mile loop hike starts from the north ... |
 
-test result:
-context_recall	0.102564
-faithfulness	0.928641
-answer_accuracy	0.000000
-noise_sensitivity	0.253968
+**Test results:**
+
+| Metric | Score |
+| --- | --- |
+| context_recall | 0.102564 |
+| faithfulness | 0.928641 |
+| answer_accuracy | 0.000000 |
+| noise_sensitivity | 0.253968 |
 
 ### Task 6: Improving Your Prototype
-During testing, I found some guardrails are needed to make sure user's requests are realistic. I think there should be more edge cases that we need guardrails for them.
 
-Users may not like the hiking plan, I think it needs one more step. When a plan is generated, check with user if the hiking plan ok, if not, choose a nother tour and regerenate a plan.
+During testing, I found that some guardrails are needed to make sure users' requests are realistic. I suspect there are more edge cases that will need guardrails as well.
 
-Users may not like go to same place multiple times. So we need somehow to remember plans generated for a user before, and try to avoid them when generate a new plan.
+I also made many user-experience improvements, including optimizing the app to work smoothly in mobile browsers.
 
 ### Task 7: Next Steps
-If I have chance, I'd like to make this hiking planner automanamous. It can automatically, say every Thuresday, post messages like "weekend is comming, any hiking ideas?' to my hiking group channel , then collect users' requests (from the group channel), then generate a hiking plan and post it in the channel.
+
+Users may not like the generated hiking plan, so I think one more step is needed: after a plan is generated, check with the user whether the plan is acceptable; if not, choose another tour and regenerate the plan.
+
+Users may also not want to go to the same place multiple times. So we need some way to remember the plans generated for a user in the past and try to avoid repeating them when generating a new plan.
+
+If I have the chance, I'd like to make this hiking planner autonomous. For example, it could automatically post a message like "Weekend is coming, any hiking ideas?" to my hiking group channel every Thursday, collect users' requests from the group channel, generate a hiking plan, and post it in the channel.
