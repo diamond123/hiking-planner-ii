@@ -77,6 +77,7 @@ const HISTORY_CLEAR_DELAY_MS = 20 * 60 * 1000;
 let inactivityTimer = null;
 let historyClearTimer = null;
 let lastAssistantText = "";
+let planJustCompleted = false;
 
 function clearInactivityTimer() {
   if (inactivityTimer) {
@@ -218,6 +219,7 @@ function setStatus(text) {
 async function sendMessage(text) {
   examplesEl.hidden = true;
   clearInactivityTimer();
+  planJustCompleted = false;
   if (historyClearTimer) {
     // A prior session ended and its messages were just left on screen for
     // reference; now that the user is actually chatting again, clear them so
@@ -280,7 +282,14 @@ async function sendMessage(text) {
   } finally {
     inputEl.disabled = false;
     formEl.querySelector("button").disabled = false;
-    inputEl.focus();
+    if (planJustCompleted) {
+      // A completed hike plan is the end of this request, not a pending
+      // question - refocusing the input would reopen the mobile virtual
+      // keyboard and cover the plan the user just asked to read.
+      inputEl.blur();
+    } else {
+      inputEl.focus();
+    }
   }
 }
 
@@ -295,6 +304,7 @@ function handleEvent(evt) {
       // The hike plan is done - there's no pending question to nudge about,
       // so don't arm the "Are you still there?" timer.
       clearInactivityTimer();
+      planJustCompleted = true;
     } else {
       scheduleInactivityNudge();
     }
