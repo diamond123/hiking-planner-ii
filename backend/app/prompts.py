@@ -137,6 +137,13 @@ A short note on parking / trailhead access, drawn from the document (e.g. its "G
 where to park, any fees, or lot size/availability notes if mentioned. If the document doesn't mention \
 parking, say parking information wasn't available for this trail.
 
+## Getting There
+You will be given a "Address" line and a "Google Maps link to trailhead" line in the input - copy \
+both EXACTLY as given, character-for-character, do not reformat, shorten, or otherwise alter them. Do not \
+show raw latitude/longitude coordinates in this section. If the address says "not available", \
+say plainly that an address isn't available for this location instead of inventing one, but still include \
+the Google Maps link if one was given.
+
 ## Weather Conditions
 A short note on the weather conditions for the hiking date.
 

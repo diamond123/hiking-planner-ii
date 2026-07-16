@@ -21,7 +21,7 @@ from app.constants import (
     SAME_DAY_CUTOFF_HOUR,
 )
 from app.db import get_document_by_source
-from app.geocode import geocode_location
+from app.geocode import geocode_location, reverse_geocode_latlon
 from app.llm import (
     condition_judge_llm,
     guardrail_llm,
@@ -553,12 +553,24 @@ def generate_plan(state: HikingState) -> dict:
     writer({"type": "status", "text": "Preparing your hiking plan..."})
 
     md = state["candidate_chunk"]["metadata"]
+    location = md.get("location")
+    if location and location.get("lat") and location.get("lon"):
+        lat, lon = location["lat"], location["lon"]
+        address = reverse_geocode_latlon(float(lat), float(lon))
+        gps_info = (
+            f"Address: {address or 'not available'}\n"
+            f"[Google Maps link to trailhead](https://www.google.com/maps/search/?api=1&query={lat},{lon})"
+        )
+    else:
+        gps_info = "Address: not available\nGoogle Maps link to trailhead: not available"
+
     human_content = (
         f"Trail: {md['title']}\n"
         f"Hiking date: {state['hiking_date']}\n"
         f"User preferences: {state.get('preferences_text') or 'none specified'}\n\n"
         f"Weather conditions: {state['weather_result']['reason']}\n\n"
         f"Trail conditions: {state['trail_result']['reason']}\n\n"
+        f"{gps_info}\n\n"
         f"Document content:\n{state['candidate_document']}"
     )
     response = plan_writer_llm.invoke(

@@ -74,7 +74,11 @@ limit.
 - `POST /api/chat` — body `{session_id, message}`. The response is a **streamed
 NDJSON body** (`application/x-ndjson`), one JSON object per line:
 - `{"type": "status", "text": "..."}` — progress updates emitted while the graph runs
-- `{"type": "final", "markdown": "...", "session_id": "..."}` — always the last line of every turn
+- `{"type": "final", "markdown": "...", "session_id": "...", "plan_complete": bool}` — always the last line
+  of every turn. `plan_complete` is `bool(final_state.get("final_markdown"))` — `true` only when this turn's
+  final message is a completed hike plan from `generate_plan`, `false` for an ordinary slot-filling question/
+  response. The frontend uses this to decide whether to arm the inactivity nudge (see below) — there's no
+  pending question to nudge about after a completed plan.
 - `{"type": "error", "text": "..."}` — on unhandled exceptions (stack traces are logged server-side only)
 
 Status events are emitted from inside graph nodes via LangGraph's `get_stream_writer()`, and consumed in
@@ -159,11 +163,31 @@ trail-specific search and condition checks happen after. Flow, in order:
      message (even an unrelated one) retries the geocode call again.
    - **Preference-topic tracking**: `_extract_known_preference_topics()` regexes `preferences_text`
      against `PREFERENCE_TOPICS` (`views`/`difficulty`/`elevation_gain`/`distance` keyword lists in
-     `constants.py`) to compute `missing_preference_topics`, ordered by `PREFERENCE_TOPIC_ORDER`
+     `constants.py` — `views` in particular is deliberately broad: vistas, panoramas, overlooks, coastal/
+     shoreline, forest/trees/redwoods, meadows, wildflowers, canyons, sunrise/sunset, skyline, etc., not just
+     "view(s)") to compute `missing_preference_topics`, ordered by `PREFERENCE_TOPIC_ORDER`
      (`["distance", "views", "difficulty", "elevation_gain"]`, in `constants.py`) rather than alphabetically
      — a deliberate product choice for which order `ask_preferences` asks about missing topics in, not an
      incidental one. `_is_no_preference()` recognizes several "no preference" phrasings as a substring match
      to short-circuit further asking.
+     **Known sharp edge, now backstopped twice**: this whole mechanism depends on `preferences_text` (the
+     LLM's combined extraction across the request's messages) actually containing recognizable content, but
+     the LLM doesn't always comply — e.g. a reply of "anything is fine" wasn't always normalized to the
+     literal string `"no specific preference"` that `_is_no_preference()` checks for, and a reply like
+     "something easy" wasn't always folded into `preferences_text` at all, so `ask_preferences` would
+     silently repeat the exact same question. `extract_slots` now also runs two **deterministic checks
+     directly against the latest raw user message** (`latest_user_text`, captured at the top of the
+     function), scoped to `prior_missing_topics` (`missing_preference_topics` as it stood *before* this
+     turn's recomputation — i.e. whatever `ask_preferences` just asked about last turn), so these only fire
+     as a reply to an actual pending question, not on arbitrary messages:
+     1. `_extract_known_preference_topics(latest_user_text) & prior_missing_topics` — if the raw reply
+        itself contains one of `PREFERENCE_TOPICS`' own keywords for a topic that was just asked about (e.g.
+        "moderate", "something hard", "steep"), that topic is marked resolved immediately, and the raw reply
+        text is folded into `preferences_text` if the LLM's own extraction didn't already capture it.
+     2. `_reply_indicates_no_preference()` (checks against `NO_PREFERENCE_REPLY_PHRASES` — a much broader
+        set than `_is_no_preference()`'s six phrases: "anything is fine/works", "don't care", "not picky",
+        "you pick", "surprise me", "up to you", etc.) — if the raw reply matches, all of
+        `prior_missing_topics` are cleared, regardless of what `preferences_text` ended up being.
    - **Preference realism check**: whenever `preferences_text` changes to genuinely new, non-"no
      preference" content, `preference_realism_llm` (structured output `PreferenceRealismVerdict`,
      `PREFERENCE_REALISM_SYSTEM_PROMPT`) judges whether it's physically achievable for a single-day Bay
@@ -188,7 +212,7 @@ trail-specific search and condition checks happen after. Flow, in order:
      calendar date.
 3. Routing (`route_after_extract_slots`) — `route_signal=="off_topic"` (location rejected) → end turn; no
    date → `ask_date`; location given but not geocoded → `ask_location_clarification`; preferences not
-   declined and topics still missing and `preferences_ask_count < MAX_PREFERENCE_ASKS` (3, in
+   declined and topics still missing and `preferences_ask_count < MAX_PREFERENCE_ASKS` (2, in
    `constants.py`) → `ask_preferences`; otherwise → `check_weather`.
    - `ask_preferences` composes a single targeted question from whatever's actually still missing (date/
      location if somehow still unset, plus specific missing topics via `PREFERENCE_TOPIC_LABELS`) and
@@ -204,23 +228,46 @@ trail-specific search and condition checks happen after. Flow, in order:
    to pick another date, ends turn — does **not** consume a retry attempt); good → `search_qdrant`.
 5. `search_qdrant` — embeds the query (prefs + location text) with `text-embedding-3-small` (confirmed via
    `scripts/verify_qdrant.py` as the correct model for the existing vectors — `ada-002` gives near-random
-   results on this store), queries Qdrant with `limit=1`, a `must_not` filter excluding `metadata.source`
-   values already tried this turn (`excluded_sources`), and — if `location_latlon` is known — a native
-   `geo_radius` filter (50 miles). No payload index exists or is needed: this is a local on-disk Qdrant
-   store where `create_payload_index` is a no-op, but `geo_radius` filtering still works correctly via
-   brute force at this data scale (~5k points). No results → `no_candidates_response` (apology, ends turn).
-   As soon as a candidate is found, its `metadata.source` is appended to `excluded_sources` and returned in
-   the same update — this is the single place that owns exclusion, so a candidate can never be reselected
-   within the same turn's retry loop regardless of why it's later rejected.
-6. `check_trail` — Tavily search (`tools.py`, query now also includes `hiking_date`) for the candidate
-   chunk's trail conditions, judged by `condition_judge_llm` (`TRAIL_JUDGE_SYSTEM_PROMPT`). Bad → loops
-   back to `search_qdrant` (if `attempt_count < MAX_ATTEMPTS`, 4, in `constants.py`) or routes to
+   results on this store), queries Qdrant (`search_chunk()` in `qdrant_store.py`) with `limit=10`, a
+   `must_not` filter excluding `metadata.source` values already tried this turn (`excluded_sources`), and —
+   if `location_latlon` is known — a native `geo_radius` filter (`GEO_RADIUS_MILES`, in `qdrant_store.py`,
+   currently 15 miles — tight enough that a request in a disruption-heavy sub-area can exhaust most of its
+   nearby candidates quickly; see the `check_trail` note below). No payload index exists or is needed: this
+   is a local on-disk Qdrant store where `create_payload_index` is a no-op, but `geo_radius` filtering still
+   works correctly via brute force at this data scale (~5k points). Of the up to 10 points returned,
+   `search_chunk()` picks the single best-matching *source document* (not chunk) by summing each source's
+   matches' `score ** 3` ("L3 norm", rewarding sources with multiple strong-scoring chunks over one
+   marginally-higher single hit) and returning the payload of that source's highest-scoring chunk. No
+   results → `no_candidates_response` (apology, ends turn). As soon as a candidate is found, its
+   `metadata.source` is appended to `excluded_sources` and returned in the same update — this is the single
+   place that owns exclusion, so a candidate can never be reselected within the same turn's retry loop
+   regardless of why it's later rejected.
+6. `check_trail` — Tavily search (`tools.py`, query includes `hiking_date`) for the candidate chunk's trail
+   conditions, judged by `condition_judge_llm` (`TRAIL_JUDGE_SYSTEM_PROMPT`). Bad → loops back to
+   `search_qdrant` (if `attempt_count < MAX_ATTEMPTS`, 8, in `constants.py`) or routes to
    `exhausted_response` (apology, ends turn); good → `fetch_document`.
+   **Known sharp edge**: the judge's input (`judge_input` in `check_trail`) explicitly states both
+   `Trail/park being evaluated: {title}` and `Hiking date: {hiking_date}` alongside the raw Tavily results —
+   both were added after real failures. Without the trail name, the judge only had context-inference to go
+   on to tell the candidate's own conditions apart from other trails/parks mentioned in the same search
+   results; many park-district sites publish combined "Alerts and Closures" pages covering many parks at
+   once, and Tavily happily returns that whole page for an unrelated candidate's query. Without the hiking
+   date, the judge had no anchor to weigh whether a mentioned closure (which might be stale, seasonal, or
+   from a different time period) still applies to the requested date. `TRAIL_JUDGE_SYSTEM_PROMPT` explicitly
+   instructs the judge to ignore closures naming a different trail/park and to default `ok=true` when a
+   closure is undated or unclear whether it still applies. Separately, note `MAX_ATTEMPTS` retries plus the
+   narrow `GEO_RADIUS_MILES` (15) mean a real cluster of nearby trails under genuine, currently-published
+   construction/closure notices (not a judge bug) can still produce several consecutive `ok=false` results
+   before an open candidate is found or the attempts are exhausted.
 7. `fetch_document` — looks up the full document text from `backend/qdrant_data/documents.db` (a separate
    sqlite3 db, table `documents(source PK, content, metadata, ...)`) by `candidate_chunk.metadata.source`.
 8. `generate_plan` — feeds the sqlite document content + weather/trail summaries to `plan_writer_llm`
-   (gpt-4o-mini, higher temperature) to produce the final markdown plan (summary, trail sequence, weather,
-   trail conditions sections — see `GENERATE_PLAN_SYSTEM_PROMPT`). Sets `final_markdown`, ends turn.
+   (gpt-4o-mini, higher temperature) to produce the final markdown plan (summary, trail sequence, parking,
+   weather, trail conditions sections — see `GENERATE_PLAN_SYSTEM_PROMPT`; the Parking section is drawn from
+   the document's own "Getting there" content, falling back to "not available" rather than inventing
+   details). The LLM's markdown is prefixed with `PLAN_READY_MESSAGE` (`"## 🥾 Here you go!\n\n---"`,
+   `prompts.py`) before being set as `final_markdown` — a heading + horizontal rule that visually separates
+   the "done!" lead-in from the plan's own sections once rendered by `marked.parse`. Ends turn.
 
 All "ask the user something and stop" points use plain `END` routing rather than LangGraph's
 `interrupt()` — correct here because each `/api/chat` HTTP call already represents a resumed turn via the
@@ -228,8 +275,9 @@ checkpointer, so there's no need for mid-node human-in-the-loop pausing.
 
 **Module map**: `config.py` (pydantic-settings from `.env`, also calls `load_dotenv()` to populate
 `os.environ` for libraries that read env vars directly — LangSmith tracing, the Tavily wrapper),
-`constants.py` (tunable limits — `MAX_ATTEMPTS`, `MAX_PREFERENCE_ASKS`, `BAY_AREA_FALLBACK_LATLON` — plus
-the preference-topic and out-of-scope-location keyword tables), `llm.py` (singleton `ChatOpenAI` instances
+`constants.py` (tunable limits — `MAX_ATTEMPTS` (8), `MAX_PREFERENCE_ASKS` (2), `BAY_AREA_FALLBACK_LATLON` —
+plus the preference-topic and out-of-scope-location keyword tables; `GEO_RADIUS_MILES` (15) lives in
+`qdrant_store.py` instead, next to the search call that uses it), `llm.py` (singleton `ChatOpenAI` instances
 incl. structured-output binds), `qdrant_store.py` / `geocode.py` / `db.py` / `tools.py` (external system
 access, one module each — `tools.py` now holds both the NWS weather client and the Tavily trail-conditions
 search), `schemas.py` (all Pydantic structured-output models), `prompts.py` (every system prompt / template
@@ -287,11 +335,42 @@ via an explicit `.app[hidden], .gate[hidden] { display: none }` rule in `style.c
 toggled section styled with its own `display`, it needs the same `[hidden]` override or it'll render
 regardless of the `hidden` property.
 
+**Mobile viewport handling**: on phones, `100vh`/`100dvh` alone isn't enough — `100vh` is the *largest*
+possible viewport (address bar collapsed), so it overflows the actually-visible area whenever the address
+bar is showing, pushing `.app-header` out of view; and on-screen keyboards shrink the *visual* viewport
+(`window.visualViewport`) without shrinking the *layout* viewport (`window.innerHeight`), so a
+`height: 100dvh` column doesn't reliably shrink when the keyboard opens on every browser, pushing chat
+history out of sight above the input. Fixed with three layers in `style.css`/`app.js`, each overriding the
+previous as a progressive enhancement: `.app`/`.gate` height cascades `100vh` → `100dvh` →
+`var(--app-height, 100dvh)`, where `--app-height` is set in `app.js` from `window.visualViewport.height`
+(falling back to `window.innerHeight`) and kept live via a `visualViewport` `resize` listener, which also
+re-scrolls `#messages` to bottom on every resize (keyboard open/close) and on `#chat-input` focus. `.messages`
+also needs `min-height: 0` — being a flex child that's also a scroll container, it won't shrink below its
+content size without it in some mobile browsers, growing past the `.app` column instead of scrolling
+internally. `html, body` get `overflow: hidden` so the outer document itself never scrolls/rubber-bands
+(only `#messages` should scroll) — a scrolling document was part of what let the header drift out of place.
+The viewport `<meta>` tag also sets `viewport-fit=cover` (enables `env(safe-area-inset-*)`, used for
+padding on `.app-header`/`.chat-form` so they clear notches/home indicators) and
+`interactive-widget=resizes-content` (tells supporting browsers, e.g. Chrome on Android, to resize the
+layout viewport around the keyboard directly, making the JS fallback redundant there but harmless
+elsewhere).
+
+**Example prompt chips**: `#examples` in `index.html`, right below the header and above `#messages` — a
+handful of clickable sample requests (e.g. "Find a hiking place in south San Jose with lots of trees").
+Clicking one calls `sendMessage()` directly with that chip's text, same as typing it and hitting send.
+`sendMessage()` hides the section (`examplesEl.hidden = true`) the moment any message is sent, and
+`clearMessageHistory()` un-hides it again — so it reappears for a genuinely new conversation (after the
+20-minute history-clear window, or immediately if the user starts chatting again — see below) but stays out
+of the way once a conversation is underway.
+
 **Inactivity handling**: purely client-side (`app.js`) — there's no server-push channel (no WebSocket/SSE),
 so the backend can never proactively message the user; only the frontend can notice idle time via timers.
-`scheduleInactivityNudge()` is called every time an assistant response lands (`handleEvent`, on `"final"`/
+`scheduleInactivityNudge()` is called when an assistant response lands (`handleEvent`, on `"final"`/
 `"error"`) and cancelled (`clearInactivityTimer()`) the moment the user sends anything (`sendMessage()`), so
-only genuine silence *after* an assistant message accumulates. Two-stage timeout: after
+only genuine silence *after* an assistant message accumulates. **Exception**: a `"final"` event with
+`plan_complete: true` (see the `/api/chat` response shape above) calls `clearInactivityTimer()` instead of
+scheduling — a completed hike plan isn't a pending question, so there's nothing to nudge the user about.
+Two-stage timeout: after
 `INACTIVITY_NUDGE_MS` (2 min) of silence, `showInactivityNudge()` appends an italicized "Are you still
 there?" bubble — repeating the last assistant message verbatim if it's short (`<= REPEAT_QUESTION_MAX_LENGTH`,
 220 chars, so real questions get repeated but full markdown plans don't dump a wall of text back at the
@@ -331,3 +410,44 @@ testing secret `1x0000000000000000000000000000000AA`; swap for a real secret bef
 currently Cloudflare's testing sitekey `1x00000000000000000000AA`, which always passes and shows a visible
 "for testing only" watermark; swap for a real site key before any real deployment). Read by
 `vite.config.js` at build/dev time, not by the browser directly.
+
+## Deployment
+
+**Backend is deployed to Railway, not Vercel** — Vercel's serverless model is fundamentally incompatible
+with this backend: `qdrant_store.py`'s module-level `QdrantClient(path=...)` takes an exclusive on-disk
+lock and needs a writable persistent filesystem, and `InMemorySaver` (conversation checkpointing) plus the
+in-process rate limiter (`rate_limit.py`) both need one long-lived process, not ephemeral
+per-invocation ones. Railway service `hiking-planner-ii` (project `focused-prosperity`), Root Directory
+set to `backend` in the service's Settings → Source (required — without it, Railway's builder sees the
+monorepo root and can't tell what to build). Deploys via GitHub push to `main`.
+- `backend/railpack.json` sets `deploy.startCommand` for Railway's Railpack builder (the current default,
+  distinct from the older Nixpacks-era `railway.toml` config — a `startCommand` in `railway.toml` is
+  silently ignored under Railpack). This is the file to edit if the start command ever needs to change.
+- `backend/railway.toml` holds builder-agnostic service settings still respected regardless of builder:
+  `healthcheckPath` (`/api/health`), `restartPolicyType`, and **`numReplicas = 1`, pinned deliberately** —
+  more than one replica would break both `InMemorySaver` and the in-process rate limiter, which assume a
+  single process.
+- `backend/qdrant_data/` (~87MB: `collection/hiking_docs/storage.sqlite` + `documents.db`) is **committed
+  to git**, not gitignored — Railway builds from the git repo, so the vector store has to ship with it.
+  This is a deliberate departure from the "provisioned locally, not versioned" comment that used to sit
+  above this path in the root `.gitignore`; if you regenerate the Qdrant store locally, re-commit it.
+- Required env vars (`OPENAI_API_KEY`, `TAVILY_API_KEY`, `BACKEND_API_KEY`, `TURNSTILE_SECRET_KEY`,
+  `QDRANT_PATH`, `QDRANT_COLLECTION_NAME`) must be set directly in the Railway service (`railway variable
+  set KEY --stdin`, or the dashboard) — `backend/.env` is gitignored and never reaches the deployed
+  container. **Never run `railway variable list` without `-k`/`--json` suppressed or output redirected** —
+  the default table view prints raw secret values, not just names.
+
+**Frontend is deployed to Vercel**, project `hiking-planner-ii`, **not connected to GitHub** — deploys are
+manual via `vercel --prod` from `frontend/`, not triggered by git push. Production alias:
+`https://hiking-planner-ii.vercel.app`.
+- **Known sharp edge, already hit once**: the committed `package.json` build script used to be `"vite
+  build && vite preview --host 127.0.0.1 --port 5500"` — fine for local use (build then preview locally),
+  but fatal for Vercel, which runs `npm run build` as its build step: `vite preview` starts a long-running
+  local server that never exits on its own, so the Vercel build hung indefinitely until timeout. Fixed to
+  plain `"vite build"`. If you ever add a local "build and preview" convenience script back, keep it
+  separate from the script Vercel's build step actually runs.
+- `API_KEY`, `API_URL`, `TURNSTILE_SITE_KEY` are set as encrypted env vars directly on the Vercel project
+  (`vercel env ls`/`add`), independent of `frontend/.env` (which is local-only/gitignored). `API_URL` must
+  point at the deployed backend's `/api/chat` endpoint (the Railway URL above, not localhost) for the
+  production frontend to actually reach the backend — verify this is current whenever the backend's
+  public URL changes.

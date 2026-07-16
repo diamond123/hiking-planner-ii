@@ -165,9 +165,54 @@ function appendMessage(role, { text, markdown, nudge } = {}) {
   return bubble;
 }
 
+// If a real status message (e.g. "Checking trails...") sits unchanged for a
+// while - the graph can spend several seconds in a single node, e.g. an LLM
+// call or the trail-retry loop - swap in a rotating carousel of generic
+// "still here" filler messages so the status line doesn't look frozen.
+// Cleared and restarted every time a new real status arrives; fully cleared
+// (no filler scheduled) when the status is blanked out at turn end.
+const FILLER_MESSAGES = [
+  "Just a moment...",
+  "Still working on it...",
+  "Almost there...",
+  "Thanks for your patience...",
+  "Be right with you...",
+];
+const FILLER_START_DELAY_MS = 4000;
+const FILLER_ROTATE_MS = 3500;
+
+let fillerStartTimer = null;
+let fillerRotateTimer = null;
+let fillerIndex = 0;
+
+function clearFillerTimers() {
+  if (fillerStartTimer) {
+    clearTimeout(fillerStartTimer);
+    fillerStartTimer = null;
+  }
+  if (fillerRotateTimer) {
+    clearInterval(fillerRotateTimer);
+    fillerRotateTimer = null;
+  }
+}
+
+function rotateFillerMessage() {
+  statusEl.textContent = FILLER_MESSAGES[fillerIndex % FILLER_MESSAGES.length];
+  fillerIndex += 1;
+}
+
 function setStatus(text) {
+  clearFillerTimers();
   statusEl.textContent = text || "";
   statusEl.classList.toggle("active", Boolean(text));
+
+  if (text) {
+    fillerIndex = 0;
+    fillerStartTimer = setTimeout(() => {
+      rotateFillerMessage();
+      fillerRotateTimer = setInterval(rotateFillerMessage, FILLER_ROTATE_MS);
+    }, FILLER_START_DELAY_MS);
+  }
 }
 
 async function sendMessage(text) {

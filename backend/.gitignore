@@ -11,3 +11,5 @@ wheels/
 
 # Generated graph diagram (scripts/draw_graph.py)
 graph.png
+.vercel
+.env*
