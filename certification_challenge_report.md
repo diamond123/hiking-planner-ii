@@ -22,13 +22,55 @@ The problem and audience are as described above. I've limited this project to ex
 
 Crawl hiking reports from websites whose content is reliable based on my experience. Use them to create a RAG application — essentially a chat app. Users can post requests like "Find a hiking route for me near Sunnyvale," "I heard there's a hiking trail leading to a cave — can you find it for me?" or "What's a good place to hike during winter?" The app searches its database, finds the record that best matches the user's request, and sends it to an LLM to generate a summary, trail sequence, parking information, and so on.
 
+Infrastructure Diagram is [here](https://github.com/diamond123/hiking-planner-ii/blob/main/Infrastructure%20Diagram.drawio.png).
+
+The following are technologies consideration
+- LLM(s): _OpenAI_ [gpt-4o-mini](https://github.com/diamond123/hiking-planner-ii/blob/main/backend/app/llm.py#L6) and [here](https://github.com/diamond123/hiking-planner-ii/blob/main/backend/app/config.py#L29)
+
+This app focus is result accuaracy and does not need high performance LLM. So I use gpt-4o-mini because it is good enough.
+- Agent orchestration framework: _LangGraph_ (https://github.com/diamond123/hiking-planner-ii/blob/main/backend/app/graph.py#L8)
+
+The workflow beyong a simple agent. So I chose LangGraph to orchestrate the flow.
+- Tool(s): _TavilySearch_ for [trail conditions] (https://github.com/diamond123/hiking-planner-ii/blob/main/backend/app/tools.py#L77), _OpenStreeMap_ api for [geolocation lookup and reverse address lookup] (https://github.com/diamond123/hiking-planner-ii/blob/main/backend/app/geocode.py), _OpenWeatherMap_ api for [weather conditions] (https://github.com/diamond123/hiking-planner-ii/blob/main/backend/app/tools.py#L69)
+
+I'm familiar with those tools and most of them are free.
+- Embedding model: _text-embedding-3-small_ (https://github.com/diamond123/hiking-planner-ii/blob/main/backend/app/config.py#L30)
+
+It is the one we used in class. I don't see a more expensive embedding model would bring additional benefit.
+
+- Vector Database: _QDrantVectorStore_ (https://github.com/diamond123/hiking-planner-ii/blob/main/backend/app/qdrant_store.py#L7) and (https://github.com/diamond123/hiking-planner-ii/tree/main/backend/qdrant_data/collection/hiking_docs)
+
+This is vector store I learnt at class and I have experience about it. It has geo search feature which is what this app needs
+
+- Monitoring tool: _LangSmith_ (set as environment variable)
+
+because I know how to use it.
+- Evaluation framework: _RAGAS_
+
+learnt at class. I also have example code to use.
+
+- User interface: _Plain Html & css_ (https://github.com/diamond123/hiking-planner-ii/tree/main/frontend)
+
+don't want to depend on any framework.
+- Deployment tool: _Vercel_ for Frontend _Railway_ for backend
+
+I'm used to them and they are convenient and free.
+
+- Any other components you need:
+
+Use Cloudflare Turnstile (https://github.com/diamond123/hiking-planner-ii/blob/main/backend/app/turnstile.py#L12) prevent nonhuman access. 
+
+A Sqlite3 Database to store parent documents.
+
 ### Task 3: Dealing with the Data
 
 Crawl hiking reports from websites whose content is reliable based on my experience. Clean, extract content from each report and split them into smaller chunks and save them to a Qdrant vector store, as we learned in class.
 
+I use basic chunking strategy as chunk size = 2000, overlap = 500. I think this chunking size is big enough to have meaning content and small enough for sysetem to process. I need to use two datastores, one is QDrantVectorStore for RAG dense search,the other is Sqlite3 for the parent document (the original document crawled from web with cleaning). One important point is I want the final hiking plan accurate, so I need to use the original document (not just the chunks) to generate a final plan. This is actually the strategy of parent-child retriever.
+
 ### Task 4: Building an End-to-End Agentic RAG Prototype
 
-Please refer to the [LangGraph diagram](https://github.com/diamond123/hiking-planner-ii/blob/main/backend/graph.png) for a diagram of this RAG application.
+Please refer to the [Agent Workflow Diagram](https://github.com/diamond123/hiking-planner-ii/blob/main/backend/graph.png) for a diagram of this RAG application.
 
 It works as follows:
 1. The user posts a request like "Find a hiking route for me near Sunnyvale."
@@ -41,6 +83,16 @@ It works as follows:
 8. If trail conditions don't allow hiking (e.g., a trail closure), go back step 5 to search the Qdrant vector store for the next-best option (exclude the previous tours when dong the search).
 9. Limit the total number of attempts (≤ 4). If no hiking tours are available, let the user know.
 10. If everything checks out, send the original hiking report (not the chunks) along with the weather and trail conditions information to an LLM to generate a final plan.
+
+Backend code is [here](https://github.com/diamond123/hiking-planner-ii/tree/main/backend/app)
+
+data is [here](https://github.com/diamond123/hiking-planner-ii/tree/main/backend/qdrant_data)
+
+Frontend code is [here](https://github.com/diamond123/hiking-planner-ii/tree/main/frontend)
+
+The app is deployed by Vercel and Railway and can be accessible by the following link.
+
+https://hiking-planner-ii.vercel.app
 
 ### Task 5: Evals
 
@@ -67,6 +119,8 @@ For a hiking plan, accuracy is very important. I used RAGAS to evaluate a few as
 
 ### Task 6: Improving Your Prototype
 
+The retriever used in the app is Parent-Child retriever. Because a main requirement is accurate result. A hiking plan with mistakes is unacceptable, the whole, original hiking document is needed for LLM to generate a hiking plan summary and trail sequence.
+
 During testing, I found that some guardrails are needed to make sure users' requests are realistic. I suspect there are more edge cases that will need guardrails as well.
 
 I also made many user-experience improvements, including optimizing the app to work smoothly in mobile browsers.
@@ -78,3 +132,4 @@ Users may not like the generated hiking plan, so I think one more step is needed
 Users may also not want to go to the same place multiple times. So we need some way to remember the plans generated for a user in the past and try to avoid repeating them when generating a new plan.
 
 If I have the chance, I'd like to make this hiking planner autonomous. For example, it could automatically post a message like "Weekend is coming, any hiking ideas?" to my hiking group channel every Thursday, collect users' requests from the group channel, generate a hiking plan, and post it in the channel.
+
