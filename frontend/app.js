@@ -162,7 +162,15 @@ function appendMessage(role, { text, markdown, nudge } = {}) {
     bubble.textContent = text;
   }
   messagesEl.appendChild(bubble);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  if (markdown) {
+    // Plans can be taller than the viewport - scroll so the top of the new
+    // plan bubble is visible instead of jumping straight to its bottom
+    // (which scrollTop = scrollHeight would do), so small screens don't
+    // land mid-plan with the summary already scrolled out of view.
+    bubble.scrollIntoView({ block: "start" });
+  } else {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
   return bubble;
 }
 
