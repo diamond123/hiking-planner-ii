@@ -201,6 +201,19 @@ trail-specific search and condition checks happen after. Flow, in order:
      in the same return so they don't need to be re-given, mirroring the date-rejection recovery flow. Only
      runs when `preferences_text` actually changed from its prior value (not on every turn), to avoid
      re-judging already-accepted preferences on every subsequent slot-filling turn.
+   - **Date resolution is sticky once resolved**: `slot_extractor_llm` re-derives `hiking_date` from
+     `messages[request_start_index:]` on every turn where any slot (typically preferences) is still
+     missing — it doesn't know about the state's already-resolved value, only the raw conversation text.
+     **Known sharp edge**: this re-derivation isn't guaranteed to agree with itself turn to turn, even at
+     `temperature=0` — a relative phrase like "this weekend" was observed resolving correctly on the turn
+     it was first given, then re-resolving to a *different* date (once, incorrectly, to the current day) on
+     a later turn after the user answered the preferences question, which could trip the same-day cutoff
+     below on a date that had already been accepted. `hiking_date` is therefore kept sticky: line ~303 uses
+     `state.get("hiking_date") or (slots.hiking_date if slots else None)`, so a value already sitting in
+     state always wins over a fresh extraction. Trade-off: a user casually changing their mind mid-slot-filling
+     ("actually, make it Sunday instead") without the date having been cleared first (e.g. via the realism
+     check below) won't be picked up — an accepted flow, since silent flip-flopping of an already-valid date
+     was the worse failure mode.
    - **Date realism check**: `_validate_hike_date()` rejects a resolved `YYYY-MM-DD` `hiking_date` if it's
      in the past, more than `MAX_DATE_DAYS_AHEAD` (365, in `constants.py`) days out, or is *today* but the
      current Pacific-time hour is past `SAME_DAY_CUTOFF_HOUR` (16, i.e. 4pm — not enough daylight left to
@@ -293,7 +306,9 @@ comes transitively via `langchain`/`langgraph`).
 `<script>` tag for markdown rendering (`marked.parse(...)`). Vite (`vite.config.js`, `package.json`) is now
 a required dev/build dependency — see the Commands section above for why. `frontend/dist/` is gitignored,
 not committed — it's build output, regenerated locally by `npm run build` before every `vercel --prod`
-deploy (see Deployment below), not something to check in.
+deploy (see Deployment below), not something to check in. The favicon (`<link rel="icon">` in `index.html`'s
+`<head>`) is an inline SVG data URI of the 🥾 emoji — same icon used in the app header/gate — rather than a
+separate image file, so there's no asset to keep in sync if that emoji ever changes.
 
 `app.js` key mechanics:
 - `API_KEY`/`API_URL`/`TURNSTILE_SITE_KEY` are read from `import.meta.env.*` (populated by Vite's `define`
