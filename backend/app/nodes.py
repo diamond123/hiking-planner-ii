@@ -284,8 +284,9 @@ def extract_slots(state: HikingState) -> dict:
         system_prompt = (
             f"{EXTRACT_SLOTS_SYSTEM_PROMPT}\n\n"
             f"Today in US Pacific time is {pacific_today}. Resolve relative dates like "
-            f"'today', 'tomorrow', 'this Saturday', and 'next weekend' against this "
-            f"date. When you can "
+            f"'today', 'tomorrow', 'this Saturday', 'this weekend', and 'next weekend' "
+            f"against this date ('this weekend' means the upcoming Saturday, not today, "
+            f"unless today itself is already Saturday or Sunday). When you can "
             f"resolve a date precisely, return it as YYYY-MM-DD."
         )
 
@@ -299,7 +300,14 @@ def extract_slots(state: HikingState) -> dict:
                 [SystemMessage(content=system_prompt), *relevant_messages]
             )
 
-    hiking_date =  slots.hiking_date if slots else state.get("hiking_date")
+    # Sticky once resolved: a fresh slot_extractor_llm call re-reads the whole
+    # conversation (needed to pick up newly answered preferences), and re-deriving
+    # a relative phrase like "this weekend" from scratch each time isn't guaranteed
+    # to agree with itself run to run even at temperature=0 - which previously
+    # let an already-valid date flip to a different (and sometimes rejected) one
+    # on a later turn. Once state already holds a resolved date, keep it rather
+    # than trusting a re-extraction of the same source text.
+    hiking_date = state.get("hiking_date") or (slots.hiking_date if slots else None)
 
     date_rejection_reason = _validate_hike_date(hiking_date) if hiking_date else None
     if date_rejection_reason:
