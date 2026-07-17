@@ -184,6 +184,7 @@ body {
 
 .msg.assistant.plan {
   white-space: normal;
+  scroll-margin-top: 5px;
 }
 
 .msg.assistant.nudge {
