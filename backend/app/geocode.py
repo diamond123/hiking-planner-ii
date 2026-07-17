@@ -53,6 +53,26 @@ def geocode_location(location_text: str) -> dict | None:
                 return None
 
 
+# Nominatim's `address.road` field is populated for any nearest named "highway"
+# way, including footpaths/cycleways through parks and open space - not just
+# streets with real house-number addressing. Trailheads deep in a regional park
+# (e.g. Quarry Lakes) often have no real street nearby, so the "road" Nominatim
+# reports is literally the trail itself (e.g. "San Francisco Bay Trail"). Feeding
+# that through house-number-style formatting produces a string that looks like a
+# mailing address but isn't one. `address` doesn't expose the road segment's own
+# class/type (only the top-matched result's), so a name keyword check backstops
+# the class/type check for cases like a parking lot (class=amenity) that sits on
+# a trail rather than a street.
+_TRAIL_HIGHWAY_TYPES = {"path", "footway", "cycleway", "bridleway", "track", "steps", "pedestrian"}
+_TRAIL_NAME_KEYWORDS = ("trail", "path")
+
+
+def _is_trail_road(result: dict, road: str) -> bool:
+    if result.get("class") == "highway" and result.get("type") in _TRAIL_HIGHWAY_TYPES:
+        return True
+    return any(kw in road.lower() for kw in _TRAIL_NAME_KEYWORDS)
+
+
 def _format_reverse_geocode_address(result: dict) -> str | None:
     address = result.get("address")
     if not address:
@@ -60,7 +80,12 @@ def _format_reverse_geocode_address(result: dict) -> str | None:
 
     parts = []
     road = address.get("road")
-    if road:
+    if road and _is_trail_road(result, road):
+        # No real street here - fall back to the trail/park name itself (prefer
+        # the matched feature's own name, e.g. a park polygon, over the trail
+        # segment name) instead of fabricating a house-numbered-style address.
+        parts.append(result.get("name") or road)
+    elif road:
         house_number = address.get("house_number")
         parts.append(f"{house_number} {road}" if house_number else road)
 
