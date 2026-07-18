@@ -100,14 +100,22 @@ NDJSON body** (`application/x-ndjson`), one JSON object per line:
   checkpointed state (via `compiled_graph.aget_state`), strips the `PLAN_READY_MESSAGE` chat-bubble lead-in
   ("## 🥾 Here you go!\n\n---" — appropriate framing for a bubble in an ongoing conversation, but a dangling
   non-sequitur at the top of a standalone email), converts the rest to HTML via `email_sender.py`
-  (`markdown` package + a minimal inline-styled template), and sends it through Gmail via
-  `smtplib.SMTP_SSL("smtp.gmail.com", 465)` using `EMAIL_USER`/`EMAIL_PASS` (`EMAIL_PASS` **must be a Gmail
-  App Password**, not the account password — plain password auth is rejected once 2-Step Verification is
-  on, the default for most accounts now). Runs the blocking `smtplib` call via `asyncio.to_thread` rather
-  than blocking the event loop. On success, calls `compiled_graph.checkpointer.adelete_thread(session_id)`
-  exactly like `/api/end-session` — sending the email ends the session. 400s on a malformed address, an
-  unconfigured `EMAIL_USER`/`EMAIL_PASS`, or no completed plan yet; 502 on an SMTP failure (logged
-  server-side, not exposed to the client).
+  (`markdown` package + a minimal inline-styled template), and sends it through the **Resend** HTTPS API
+  (`POST https://api.resend.com/emails`, `requests.post` with `Authorization: Bearer {RESEND_API_KEY}`) —
+  **not raw SMTP**. This was a deliberate correction: Railway (like most PaaS hosts) blocks outbound SMTP
+  ports (25/465/587) by default to prevent abuse, so an earlier `smtplib.SMTP_SSL` implementation worked
+  fine locally but failed on the deployed backend with `OSError: [Errno 101] Network is unreachable` after
+  hanging for minutes (the TCP SYN to `smtp.gmail.com:465` was silently dropped) — this isn't fixable by
+  changing ports or credentials, since it's a network-level block, not an auth or code issue. An HTTPS API
+  provider sidesteps it entirely. `requests.post` is still a blocking call, so it's run via
+  `asyncio.to_thread` rather than blocking the event loop. **`RESEND_FROM`'s sandbox-mode restriction**:
+  without verifying a custom sending domain with Resend, mail can only be sent from their own
+  `onboarding@resend.dev` address, and — more importantly — will only actually *deliver* to the email
+  address on the Resend account that owns `RESEND_API_KEY`, not arbitrary recipients; verify a domain in the
+  Resend dashboard before relying on this for real end users. On success, calls
+  `compiled_graph.checkpointer.adelete_thread(session_id)` exactly like `/api/end-session` — sending the
+  email ends the session. 400s on a malformed address, an unconfigured `RESEND_API_KEY`, or no completed
+  plan yet; 502 on a Resend API failure (logged server-side, not exposed to the client).
 
 Status events are emitted from inside graph nodes via LangGraph's `get_stream_writer()`, and consumed in
 `main.py` via `compiled_graph.astream(..., stream_mode=["custom", "values"])` — the `"custom"` channel
@@ -511,8 +519,10 @@ after; a clock installed after a real timer is already pending won't affect that
 (validates frontend requests — must match `API_KEY` below), `TURNSTILE_SECRET_KEY` (Cloudflare Turnstile
 secret, used server-side against the `siteverify` API — currently set to Cloudflare's "always passes"
 testing secret `1x0000000000000000000000000000000AA`; swap for a real secret before any real deployment),
-`EMAIL_USER`/`EMAIL_PASS` (Gmail address + **App Password**, used by `/api/send-plan-email` — a plain
-account password will fail `SMTP_SSL` login once 2-Step Verification is on), `PLANNING_LIMIT` (max
+`RESEND_API_KEY` (Resend API key, used by `/api/send-plan-email` via `email_sender.py` — see the
+`/api/send-plan-email` note above for why this is Resend's HTTPS API rather than raw SMTP), `RESEND_FROM`
+(optional, defaults to `"Hiking Planner <onboarding@resend.dev>"` — Resend's sandbox sender, which only
+delivers to the Resend account's own email until a custom domain is verified), `PLANNING_LIMIT` (max
 regenerations per planning request via `/api/regenerate-plan`; defaults to 3 if unset).
 
 `frontend/.env`: `API_KEY` (must match `BACKEND_API_KEY` above), `API_URL` (backend chat endpoint, e.g.

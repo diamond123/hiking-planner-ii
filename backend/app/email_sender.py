@@ -1,10 +1,9 @@
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-
 import markdown as markdown_lib
+import requests
 
 from app.config import settings
+
+RESEND_API_URL = "https://api.resend.com/emails"
 
 EMAIL_HTML_TEMPLATE = """\
 <html>
@@ -21,16 +20,24 @@ border-radius: 8px; padding: 24px;">
 
 
 def send_plan_email(to_email: str, plan_markdown: str) -> None:
-    """Send a hiking plan to `to_email` as an HTML email via Gmail SMTP. Raises on failure."""
+    """Send a hiking plan to `to_email` as an HTML email via the Resend API. Raises on failure.
+
+    Uses Resend's HTTPS API rather than raw SMTP - PaaS hosts like Railway block outbound SMTP
+    (ports 25/465/587) by default to prevent abuse, so smtplib to Gmail cannot connect at all
+    from a deployed container there, regardless of credentials.
+    """
     html_body = markdown_lib.markdown(plan_markdown, extensions=["extra"])
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = "Your Hiking Plan"
-    msg["From"] = settings.email_user
-    msg["To"] = to_email
-    msg.attach(MIMEText(plan_markdown, "plain"))
-    msg.attach(MIMEText(EMAIL_HTML_TEMPLATE.format(body=html_body), "html"))
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(settings.email_user, settings.email_pass)
-        server.sendmail(settings.email_user, to_email, msg.as_string())
+    response = requests.post(
+        RESEND_API_URL,
+        headers={"Authorization": f"Bearer {settings.resend_api_key}"},
+        json={
+            "from": settings.resend_from,
+            "to": [to_email],
+            "subject": "Your Hiking Plan",
+            "html": EMAIL_HTML_TEMPLATE.format(body=html_body),
+            "text": plan_markdown,
+        },
+        timeout=15,
+    )
+    response.raise_for_status()

@@ -142,7 +142,7 @@ async def regenerate_plan(req: RegeneratePlanRequest):
 async def send_plan_email_endpoint(req: SendPlanEmailRequest):
     if not EMAIL_RE.match(req.email):
         raise HTTPException(status_code=400, detail="That doesn't look like a valid email address.")
-    if not settings.email_user or not settings.email_pass:
+    if not settings.resend_api_key:
         raise HTTPException(status_code=500, detail="Email sending isn't configured.")
 
     config = {"configurable": {"thread_id": req.session_id}}

@@ -22,8 +22,11 @@ class Settings(BaseSettings):
     backend_api_key: str
     turnstile_secret_key: str
 
-    email_user: str | None = None
-    email_pass: str | None = None
+    resend_api_key: str | None = None
+    # Resend's own sandbox sender - works without verifying a custom domain,
+    # but (in sandbox mode) only delivers to the email address on the Resend
+    # account that owns resend_api_key, not arbitrary recipients.
+    resend_from: str = "Hiking Planner <onboarding@resend.dev>"
     planning_limit: int = 3
 
     langsmith_tracing: bool = False
