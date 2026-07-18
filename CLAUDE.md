@@ -425,9 +425,13 @@ scroll-to-bottom behavior.
 `renderPlanActions(bubble, evt.regenerate_remaining)`, which injects three buttons (`#plan-actions`) right
 after the plan bubble — no server-rendered markup in `index.html`, they're purely dynamic:
 - **"📧 Email me this plan"** swaps the row for an inline `<input type="email">` + Send/Cancel
-  (`startEmailFlow()`); Send POSTs to `/api/send-plan-email`, and on success ends the session client-side
+  (`startEmailFlow()`, which also calls `clearInactivityTimer()` since opening the form is itself user
+  activity); Send POSTs to `/api/send-plan-email`, and on success ends the session client-side
   (`teardownAfterSessionEnd()`, shared with the inactivity-timeout path below) since the backend already
-  deleted the thread. Cancel re-renders the three buttons via `renderPlanActions()` again, using the
+  deleted the thread. On failure (malformed address, or a real send/SMTP error), the field is cleared,
+  refocused, and the inline error is phrased as an explicit prompt to re-enter the address
+  ("`{reason}` Please re-enter your email address and try again.") rather than just leaving the bad value
+  sitting there to resubmit. Cancel re-renders the three buttons via `renderPlanActions()` again, using the
   module-level `currentRegenerateRemaining` (set every time `renderPlanActions()` runs) since the original
   `evt.regenerate_remaining` isn't otherwise in scope at that point.
 - **"🔄 Not quite — show me another"** — only rendered when `regenerateRemaining > 0` — calls
@@ -437,7 +441,20 @@ after the plan bubble — no server-rendered markup in `index.html`, they're pur
   `handleEvent()` never calls `renderPlanActions()` again, so a merely-disabled row would otherwise be stuck
   on screen forever.
 - **"✅ I'm all set, thanks!"** calls `finishSession()` — best-effort POSTs to `/api/end-session`, shows a
-  goodbye bubble, and calls `teardownAfterSessionEnd()`.
+  goodbye bubble, and calls `teardownAfterSessionEnd()`. `finishSession()` takes no arguments (it removes
+  whatever action row is currently shown via `removeExistingPlanActions()`) since it's also the callback
+  used by the idle timer below, which doesn't have a button-click's row reference to pass.
+
+**Idle timeout on an unclicked completed plan**: a finished plan deliberately does *not* arm the
+pending-question nudge-then-end flow above (`plan_complete: true` skips straight to `clearInactivityTimer()`
+territory) — there's no question to nudge about. But that meant a plan whose three buttons are never
+clicked, and no new message is ever typed, sat there forever with its backend thread never cleaned up.
+`renderPlanActions()` now calls `schedulePlanIdleEnd()` every time it runs (initial plan, a regenerated one,
+or back from the email form via Cancel), which reuses the same `inactivityTimer` slot as the pending-question
+flow (safe since a completed plan never schedules that one) to fire `finishSession` directly after
+`PLAN_IDLE_END_MS` (20 min) — no intermediate nudge stage, since "I'm all set" is exactly the right outcome
+for silence here. Cleared like any other inactivity timer by `sendMessage()`/`regeneratePlan()`/
+`startEmailFlow()`/`finishSession()` — i.e. any real interaction with the completed plan or the chat input.
 
 `streamRequest(url, body)` is the fetch-and-parse-NDJSON loop factored out of `sendMessage()` so
 `regeneratePlan()` doesn't duplicate it — both dispatch every parsed line through the same `handleEvent()`,

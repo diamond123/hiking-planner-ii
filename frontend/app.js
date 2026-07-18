@@ -77,6 +77,11 @@ const SESSION_RESET_DELAY_MS = 4000;
 // sends a new message (whichever comes first), so an old and new conversation
 // never visually blend together.
 const HISTORY_CLEAR_DELAY_MS = 20 * 60 * 1000;
+// How long a completed plan (with its action buttons still unclicked) can sit
+// idle before the session ends on its own - same outcome as clicking "I'm all
+// set", just without a nudge stage first, since there's no pending question
+// to nudge about.
+const PLAN_IDLE_END_MS = 20 * 60 * 1000;
 
 let inactivityTimer = null;
 let historyClearTimer = null;
@@ -102,6 +107,16 @@ function showInactivityNudge() {
     : "Are you still there?";
   appendMessage("assistant", { text, nudge: true });
   inactivityTimer = setTimeout(endSessionDueToInactivity, INACTIVITY_END_MS);
+}
+
+// Armed by renderPlanActions() every time the post-plan action buttons are
+// shown (initial plan, a regenerated one, or back from the email form via
+// Cancel) - reuses the same inactivityTimer slot as the pending-question flow
+// above, since a completed plan never schedules that one, so there's no
+// conflict between the two.
+function schedulePlanIdleEnd() {
+  clearInactivityTimer();
+  inactivityTimer = setTimeout(finishSession, PLAN_IDLE_END_MS);
 }
 
 // Shared tail of every "this conversation is over" path (inactivity timeout,
@@ -332,8 +347,8 @@ function handleEvent(evt) {
     const bubble = appendMessage("assistant", { markdown: evt.markdown });
     if (evt.plan_complete) {
       // The hike plan is done - there's no pending question to nudge about,
-      // so don't arm the "Are you still there?" timer.
-      clearInactivityTimer();
+      // so don't arm the "Are you still there?" timer. renderPlanActions()
+      // arms its own idle-end timer instead (see schedulePlanIdleEnd()).
       planJustCompleted = true;
       renderPlanActions(bubble, evt.regenerate_remaining);
     } else {
@@ -379,12 +394,14 @@ function renderPlanActions(afterBubble, regenerateRemaining) {
     row.appendChild(makeActionButton("🔄 Not quite — show me another", () => regeneratePlan(row)));
   }
 
-  row.appendChild(makeActionButton("✅ I'm all set, thanks!", () => finishSession(row)));
+  row.appendChild(makeActionButton("✅ I'm all set, thanks!", () => finishSession()));
 
   afterBubble.insertAdjacentElement("afterend", row);
+  schedulePlanIdleEnd();
 }
 
 function startEmailFlow(row) {
+  clearInactivityTimer();
   row.innerHTML = "";
 
   const form = document.createElement("form");
@@ -484,8 +501,11 @@ async function regeneratePlan(row) {
   }
 }
 
-function finishSession(row) {
-  row.remove();
+// Doubles as the plan-idle-end timeout callback (schedulePlanIdleEnd()) and
+// the "I'm all set" button handler - both end the session the same way, so
+// there's no `row` param; it just removes whatever action row is currently shown.
+function finishSession() {
+  removeExistingPlanActions();
   clearInactivityTimer();
   appendMessage("assistant", { text: "Glad I could help — happy hiking! 🥾" });
   endSessionOnBackend();
