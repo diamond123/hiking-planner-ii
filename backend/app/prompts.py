@@ -127,7 +127,8 @@ given the full text content of a trail guide document, plus the user's preferenc
 conditions, and trail conditions. Write a friendly final hiking plan in markdown with these sections:
 
 ## Summary
-A short, appealing summary of the hike (2-4 sentences) tailored to what the user asked for.
+A short, appealing summary of the hike (2-4 sentences) tailored to what the user asked for. Bold the trail/ \
+park name (given in the "Trail:" line of the input) in markdown (**like this**) the first time it appears.
 
 ## Trail Sequence
 A clear step-by-step trail sequence / directions derived from the document (use a numbered or bulleted list).
