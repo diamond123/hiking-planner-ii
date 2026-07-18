@@ -81,6 +81,34 @@ NDJSON body** (`application/x-ndjson`), one JSON object per line:
   pending question to nudge about after a completed plan.
 - `{"type": "error", "text": "..."}` — on unhandled exceptions (stack traces are logged server-side only)
 
+  When `plan_complete` is `true`, the final event also carries `regenerate_remaining` (`max(planning_limit -
+  regenerate_count, 0)`) so the frontend knows whether to offer the "show me another" action — see
+  Post-plan actions below.
+- `POST /api/regenerate-plan` — body `{session_id}`. Re-enters the *existing* `compiled_graph` mid-flight on
+  the same checkpointed thread via LangGraph's `Command(goto="search_qdrant", update={...})` input type,
+  instead of a normal dict input — this jumps straight to `search_qdrant` without re-running
+  `reset_turn`/`guardrail`/`extract_slots`, which matters because `reset_turn`'s "prior turn completed a
+  plan" branch (see below) would otherwise wipe `hiking_date`/`location_text`/`preferences_text` on every
+  regenerate. The `update` overrides `excluded_sources` (seeded from `plan_source_history`, so a
+  previously-shown trail is never re-offered), zeroes `attempt_count`/clears `candidate_chunk`/
+  `candidate_document`/`trail_result`/`final_markdown`, and increments `regenerate_count`.
+  `weather_result` is deliberately left untouched — date/location haven't changed, so there's no need to
+  recheck weather. 400s if there's no completed plan yet on this thread, or if `regenerate_count >=
+  PLANNING_LIMIT`. Streams the same NDJSON shape as `/api/chat` (shared via the `_stream_graph`/
+  `_build_final_payload` helpers in `main.py`), so the same status events fire naturally.
+- `POST /api/send-plan-email` — body `{session_id, email}`. Reads `final_markdown` straight off the
+  checkpointed state (via `compiled_graph.aget_state`), strips the `PLAN_READY_MESSAGE` chat-bubble lead-in
+  ("## 🥾 Here you go!\n\n---" — appropriate framing for a bubble in an ongoing conversation, but a dangling
+  non-sequitur at the top of a standalone email), converts the rest to HTML via `email_sender.py`
+  (`markdown` package + a minimal inline-styled template), and sends it through Gmail via
+  `smtplib.SMTP_SSL("smtp.gmail.com", 465)` using `EMAIL_USER`/`EMAIL_PASS` (`EMAIL_PASS` **must be a Gmail
+  App Password**, not the account password — plain password auth is rejected once 2-Step Verification is
+  on, the default for most accounts now). Runs the blocking `smtplib` call via `asyncio.to_thread` rather
+  than blocking the event loop. On success, calls `compiled_graph.checkpointer.adelete_thread(session_id)`
+  exactly like `/api/end-session` — sending the email ends the session. 400s on a malformed address, an
+  unconfigured `EMAIL_USER`/`EMAIL_PASS`, or no completed plan yet; 502 on an SMTP failure (logged
+  server-side, not exposed to the client).
+
 Status events are emitted from inside graph nodes via LangGraph's `get_stream_writer()`, and consumed in
 `main.py` via `compiled_graph.astream(..., stream_mode=["custom", "values"])` — the `"custom"` channel
 yields the status dicts nodes write, the `"values"` channel yields full-state snapshots (used to pull the
@@ -94,7 +122,10 @@ is the graph's entry point, so it runs at the start of **every** `/api/chat` cal
 completes. State splits into two intended lifetimes:
 - **Persists across turns** (slot-filling): `hiking_date`, `location_text`, `location_latlon`,
   `preferences_text`, `preferences_asked`, `preferences_ask_count`, `known_preference_topics`,
-  `missing_preference_topics`, `request_start_index`.
+  `missing_preference_topics`, `request_start_index`, plus `plan_source_history` (every candidate source
+  shown so far this planning request, across the original plan and any regenerations) and
+  `regenerate_count` (regenerations used so far this planning request, checked against `PLANNING_LIMIT`) —
+  see `/api/regenerate-plan` above.
 - **Reset every turn** by `reset_turn`: `attempt_count`, `excluded_sources`, `candidate_chunk`,
   `candidate_document`, `weather_result`, `trail_result`, `final_markdown`, `route_signal`,
   `date_rejection_reason`. The trail-retry loop (see below) is intra-turn — it does not span multiple HTTP
@@ -103,8 +134,9 @@ completes. State splits into two intended lifetimes:
 **Starting a new planning request after a completed plan**: `reset_turn` checks `state.get("final_markdown")`
 *before* clearing it — if truthy, the prior turn just finished a plan, so `reset_turn` also wipes the
 slot-filling fields above (`hiking_date`, `location_text`, `location_latlon`, `preferences_text`,
-`preferences_asked`, `preferences_ask_count`, `known_preference_topics`, `missing_preference_topics`) and
-sets `request_start_index` to the index of the just-appended new message. This is necessary but was **not
+`preferences_asked`, `preferences_ask_count`, `known_preference_topics`, `missing_preference_topics`) plus
+`plan_source_history`/`regenerate_count`, and sets `request_start_index` to the index of the just-appended
+new message. This is necessary but was **not
 sufficient on its own** the first time it was implemented: `extract_slots`'s `slot_extractor_llm` call reads
 the message history to (re)extract slots, and the completed request's messages (e.g. "hiking on 2026-07-25
 near Fremont") are still sitting in `messages` forever — clearing the state fields didn't stop the LLM from
@@ -389,6 +421,28 @@ always sends `markdown` on `final` — see the `/api/chat` response shape above)
 `#messages` rather than jumping to its bottom. Ordinary short text bubbles (`text`, no `markdown`) keep the
 scroll-to-bottom behavior.
 
+**Post-plan action buttons**: whenever a `"final"` event has `plan_complete: true`, `handleEvent()` calls
+`renderPlanActions(bubble, evt.regenerate_remaining)`, which injects three buttons (`#plan-actions`) right
+after the plan bubble — no server-rendered markup in `index.html`, they're purely dynamic:
+- **"📧 Email me this plan"** swaps the row for an inline `<input type="email">` + Send/Cancel
+  (`startEmailFlow()`); Send POSTs to `/api/send-plan-email`, and on success ends the session client-side
+  (`teardownAfterSessionEnd()`, shared with the inactivity-timeout path below) since the backend already
+  deleted the thread. Cancel re-renders the three buttons via `renderPlanActions()` again, using the
+  module-level `currentRegenerateRemaining` (set every time `renderPlanActions()` runs) since the original
+  `evt.regenerate_remaining` isn't otherwise in scope at that point.
+- **"🔄 Not quite — show me another"** — only rendered when `regenerateRemaining > 0` — calls
+  `regeneratePlan()`, which removes the current action row *immediately* (not just disables it) before
+  streaming `/api/regenerate-plan` through the same `streamRequest()` helper `sendMessage()` uses; removing
+  it upfront matters because if this regenerate attempt exhausts all candidates (`plan_complete: false`),
+  `handleEvent()` never calls `renderPlanActions()` again, so a merely-disabled row would otherwise be stuck
+  on screen forever.
+- **"✅ I'm all set, thanks!"** calls `finishSession()` — best-effort POSTs to `/api/end-session`, shows a
+  goodbye bubble, and calls `teardownAfterSessionEnd()`.
+
+`streamRequest(url, body)` is the fetch-and-parse-NDJSON loop factored out of `sendMessage()` so
+`regeneratePlan()` doesn't duplicate it — both dispatch every parsed line through the same `handleEvent()`,
+which is why a regenerated plan gets its own fresh action row for free.
+
 **Example prompt chips**: `#examples` in `index.html`, right below the header and above `#messages` — a
 handful of clickable sample requests (e.g. "Find a hiking place in south San Jose with lots of trees").
 Clicking one calls `sendMessage()` directly with that chip's text, same as typing it and hitting send.
@@ -409,8 +463,10 @@ Two-stage timeout: after
 there?" bubble — repeating the last assistant message verbatim if it's short (`<= REPEAT_QUESTION_MAX_LENGTH`,
 220 chars, so real questions get repeated but full markdown plans don't dump a wall of text back at the
 user) — then arms a second timer. After another `INACTIVITY_END_MS` (2 min, 4 min total) of continued
-silence, `endSessionDueToInactivity()` shows a goodbye message, disables the input, best-effort POSTs to
-`/api/end-session` to drop the backend's checkpointed state for that thread, then calls `startNewSession()`.
+silence, `endSessionDueToInactivity()` shows a goodbye message, best-effort POSTs to `/api/end-session` to
+drop the backend's checkpointed state for that thread, then calls `teardownAfterSessionEnd()` — the same
+disable-input-then-`startNewSession()`-after-a-delay tail shared with the "I'm all set" button and a
+completed email send (see Post-plan action buttons above).
 
 **Session identity reset vs. message history clearing are deliberately decoupled**, driven by two separate
 timers:
@@ -437,7 +493,10 @@ after; a clock installed after a real timer is already pending won't affect that
 `LANGSMITH_API_KEY`, `QDRANT_PATH` (relative to `backend/`), `QDRANT_COLLECTION_NAME`, `BACKEND_API_KEY`
 (validates frontend requests — must match `API_KEY` below), `TURNSTILE_SECRET_KEY` (Cloudflare Turnstile
 secret, used server-side against the `siteverify` API — currently set to Cloudflare's "always passes"
-testing secret `1x0000000000000000000000000000000AA`; swap for a real secret before any real deployment).
+testing secret `1x0000000000000000000000000000000AA`; swap for a real secret before any real deployment),
+`EMAIL_USER`/`EMAIL_PASS` (Gmail address + **App Password**, used by `/api/send-plan-email` — a plain
+account password will fail `SMTP_SSL` login once 2-Step Verification is on), `PLANNING_LIMIT` (max
+regenerations per planning request via `/api/regenerate-plan`; defaults to 3 if unset).
 
 `frontend/.env`: `API_KEY` (must match `BACKEND_API_KEY` above), `API_URL` (backend chat endpoint, e.g.
 `http://localhost:8000/api/chat`), `TURNSTILE_SITE_KEY` (Cloudflare Turnstile site key for the widget —

@@ -244,6 +244,8 @@ def reset_turn(state: HikingState) -> dict:
             "known_preference_topics": [],
             "missing_preference_topics": [],
             "request_start_index": max(len(messages) - 1, 0),
+            "plan_source_history": [],
+            "regenerate_count": 0,
         })
 
     return updates
@@ -586,4 +588,12 @@ def generate_plan(state: HikingState) -> dict:
         [SystemMessage(content=GENERATE_PLAN_SYSTEM_PROMPT), HumanMessage(content=human_content)]
     )
     markdown = f"{PLAN_READY_MESSAGE}\n\n{response.content}"
-    return {"final_markdown": markdown, "messages": [AIMessage(content=markdown)]}
+
+    plan_source_history = list(state.get("plan_source_history") or [])
+    plan_source_history.append(md["source"])
+
+    return {
+        "final_markdown": markdown,
+        "messages": [AIMessage(content=markdown)],
+        "plan_source_history": plan_source_history,
+    }

@@ -36,6 +36,13 @@ class HikingState(TypedDict, total=False):
     location_text: str | None
     location_latlon: dict | None
 
+    # every candidate source shown so far this planning request (seeds
+    # excluded_sources on regenerate); regenerations used so far this
+    # planning request, checked against settings.planning_limit. Both persist
+    # across turns via the checkpointer, reset only when a new request starts.
+    plan_source_history: list[str]
+    regenerate_count: int
+
     # within-turn retry loop state, reset at the start of every invocation
     attempt_count: int
     excluded_sources: list[str]

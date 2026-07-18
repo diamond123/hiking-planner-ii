@@ -12,6 +12,8 @@ let API_URL = "";
 let TURNSTILE_SITE_KEY = "";
 let TURNSTILE_VERIFY_URL = "";
 let END_SESSION_URL = "";
+let REGENERATE_URL = "";
+let SEND_EMAIL_URL = "";
 
 // Mobile browsers report `100vh`/`100dvh` based on the layout viewport, which
 // doesn't shrink when the on-screen keyboard opens - only the *visual*
@@ -42,6 +44,8 @@ function loadApiConfig() {
   TURNSTILE_SITE_KEY = env.TURNSTILE_SITE_KEY || "";
   TURNSTILE_VERIFY_URL = API_URL.replace(/\/api\/chat$/, "/api/verify-turnstile");
   END_SESSION_URL = API_URL.replace(/\/api\/chat$/, "/api/end-session");
+  REGENERATE_URL = API_URL.replace(/\/api\/chat$/, "/api/regenerate-plan");
+  SEND_EMAIL_URL = API_URL.replace(/\/api\/chat$/, "/api/send-plan-email");
 }
 
 function getSessionId() {
@@ -100,15 +104,17 @@ function showInactivityNudge() {
   inactivityTimer = setTimeout(endSessionDueToInactivity, INACTIVITY_END_MS);
 }
 
-async function endSessionDueToInactivity() {
-  clearInactivityTimer();
-  appendMessage("assistant", {
-    text: "Looks like something might have come up on your end. Bye for now — see you next time!",
-    nudge: true,
-  });
+// Shared tail of every "this conversation is over" path (inactivity timeout,
+// the "I'm all set" button, a completed email send) - disables input and
+// leaves the final message visible for a moment before minting a fresh
+// session, rather than wiping it away in the same tick it was shown.
+function teardownAfterSessionEnd() {
   inputEl.disabled = true;
   formEl.querySelector("button").disabled = true;
+  setTimeout(startNewSession, SESSION_RESET_DELAY_MS);
+}
 
+async function endSessionOnBackend() {
   try {
     await fetch(END_SESSION_URL, {
       method: "POST",
@@ -116,12 +122,18 @@ async function endSessionDueToInactivity() {
       body: JSON.stringify({ session_id: sessionId }),
     });
   } catch (err) {
-    // Best-effort backend cleanup only; still start a fresh session locally either way.
+    // Best-effort backend cleanup only; the frontend tears down either way.
   }
+}
 
-  // Leave the goodbye message visible for a moment before resetting, instead
-  // of wiping it away in the same tick it was shown.
-  setTimeout(startNewSession, SESSION_RESET_DELAY_MS);
+async function endSessionDueToInactivity() {
+  clearInactivityTimer();
+  appendMessage("assistant", {
+    text: "Looks like something might have come up on your end. Bye for now — see you next time!",
+    nudge: true,
+  });
+  await endSessionOnBackend();
+  teardownAfterSessionEnd();
 }
 
 function clearHistoryClearTimer() {
@@ -224,6 +236,49 @@ function setStatus(text) {
   }
 }
 
+// Shared by sendMessage() and regeneratePlan() - POSTs `body` to `url`, reads
+// the streamed NDJSON response line-by-line, and dispatches each line through
+// handleEvent. Throws an Error (with `isHttpError: true` for a non-2xx
+// response) on failure so callers can report it their own way.
+async function streamRequest(url, body) {
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-API-Key": API_KEY,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const err = new Error(`Request failed (HTTP ${resp.status}).`);
+    err.isHttpError = true;
+    throw err;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop();
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      handleEvent(JSON.parse(line));
+    }
+  }
+
+  if (buffer.trim()) {
+    handleEvent(JSON.parse(buffer));
+  }
+}
+
 async function sendMessage(text) {
   examplesEl.hidden = true;
   clearInactivityTimer();
@@ -248,45 +303,12 @@ async function sendMessage(text) {
   formEl.querySelector("button").disabled = true;
 
   try {
-    const resp = await fetch(API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-API-Key": API_KEY,
-      },
-      body: JSON.stringify({ session_id: sessionId, message: text }),
-    });
-
-    if (!resp.ok) {
-      setStatus("");
-      appendMessage("assistant", { text: `Request failed (HTTP ${resp.status}).` });
-      return;
-    }
-
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop();
-
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        handleEvent(JSON.parse(line));
-      }
-    }
-
-    if (buffer.trim()) {
-      handleEvent(JSON.parse(buffer));
-    }
+    await streamRequest(API_URL, { session_id: sessionId, message: text });
   } catch (err) {
     setStatus("");
-    appendMessage("assistant", { text: "Sorry, something went wrong reaching the server." });
+    appendMessage("assistant", {
+      text: err.isHttpError ? err.message : "Sorry, something went wrong reaching the server.",
+    });
   } finally {
     inputEl.disabled = false;
     formEl.querySelector("button").disabled = false;
@@ -307,12 +329,13 @@ function handleEvent(evt) {
   } else if (evt.type === "final") {
     setStatus("");
     lastAssistantText = evt.markdown || "";
-    appendMessage("assistant", { markdown: evt.markdown });
+    const bubble = appendMessage("assistant", { markdown: evt.markdown });
     if (evt.plan_complete) {
       // The hike plan is done - there's no pending question to nudge about,
       // so don't arm the "Are you still there?" timer.
       clearInactivityTimer();
       planJustCompleted = true;
+      renderPlanActions(bubble, evt.regenerate_remaining);
     } else {
       scheduleInactivityNudge();
     }
@@ -322,6 +345,151 @@ function handleEvent(evt) {
     appendMessage("assistant", { text: evt.text });
     scheduleInactivityNudge();
   }
+}
+
+// --- Post-plan action buttons: email / regenerate / done ---------------
+
+let currentRegenerateRemaining = 0;
+
+function removeExistingPlanActions() {
+  const existing = document.getElementById("plan-actions");
+  if (existing) existing.remove();
+}
+
+function makeActionButton(label, onClick) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "plan-action-btn";
+  btn.textContent = label;
+  btn.addEventListener("click", onClick);
+  return btn;
+}
+
+function renderPlanActions(afterBubble, regenerateRemaining) {
+  removeExistingPlanActions();
+  currentRegenerateRemaining = regenerateRemaining || 0;
+
+  const row = document.createElement("div");
+  row.id = "plan-actions";
+  row.className = "plan-actions";
+
+  row.appendChild(makeActionButton("📧 Email me this plan", () => startEmailFlow(row)));
+
+  if (regenerateRemaining > 0) {
+    row.appendChild(makeActionButton("🔄 Not quite — show me another", () => regeneratePlan(row)));
+  }
+
+  row.appendChild(makeActionButton("✅ I'm all set, thanks!", () => finishSession(row)));
+
+  afterBubble.insertAdjacentElement("afterend", row);
+}
+
+function startEmailFlow(row) {
+  row.innerHTML = "";
+
+  const form = document.createElement("form");
+  form.className = "email-form";
+
+  const emailInput = document.createElement("input");
+  emailInput.type = "email";
+  emailInput.placeholder = "you@example.com";
+  emailInput.required = true;
+  emailInput.autocomplete = "email";
+
+  const sendBtn = document.createElement("button");
+  sendBtn.type = "submit";
+  sendBtn.textContent = "Send";
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.className = "email-form-cancel";
+  cancelBtn.addEventListener("click", () => {
+    renderPlanActions(row.previousElementSibling, currentRegenerateRemaining);
+  });
+
+  const errorEl = document.createElement("p");
+  errorEl.className = "plan-action-error";
+
+  form.appendChild(emailInput);
+  form.appendChild(sendBtn);
+  form.appendChild(cancelBtn);
+  row.appendChild(form);
+  row.appendChild(errorEl);
+  emailInput.focus();
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errorEl.textContent = "";
+    emailInput.disabled = true;
+    sendBtn.disabled = true;
+    cancelBtn.disabled = true;
+    sendBtn.textContent = "Sending...";
+
+    try {
+      const resp = await fetch(SEND_EMAIL_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-API-Key": API_KEY },
+        body: JSON.stringify({ session_id: sessionId, email: emailInput.value.trim() }),
+      });
+      const data = await resp.json().catch(() => ({}));
+
+      if (!resp.ok) {
+        throw new Error(data.detail || "Couldn't send the email. Please try again.");
+      }
+
+      row.remove();
+      appendMessage("assistant", {
+        text: "✅ Sent! Check your inbox — and your spam folder, just in case.",
+      });
+      await endSessionOnBackend();
+      teardownAfterSessionEnd();
+    } catch (err) {
+      const reason = err.message || "Couldn't send the email.";
+      errorEl.textContent = `${reason} Please re-enter your email address and try again.`;
+      emailInput.value = "";
+      emailInput.disabled = false;
+      sendBtn.disabled = false;
+      cancelBtn.disabled = false;
+      sendBtn.textContent = "Send";
+      emailInput.focus();
+    }
+  });
+}
+
+async function regeneratePlan(row) {
+  // Remove immediately rather than just disabling - if this regenerate
+  // attempt exhausts all candidates (plan_complete: false), handleEvent()
+  // won't call renderPlanActions() again, so a merely-disabled row would be
+  // left stuck on screen forever.
+  row.remove();
+  clearInactivityTimer();
+  planJustCompleted = false;
+  appendMessage("user", { text: "Show me a different trail" });
+  setStatus("Looking for another option...");
+
+  try {
+    await streamRequest(REGENERATE_URL, { session_id: sessionId });
+  } catch (err) {
+    setStatus("");
+    appendMessage("assistant", {
+      text: err.isHttpError ? err.message : "Sorry, something went wrong reaching the server.",
+    });
+  } finally {
+    if (planJustCompleted) {
+      inputEl.blur();
+    } else {
+      inputEl.focus();
+    }
+  }
+}
+
+function finishSession(row) {
+  row.remove();
+  clearInactivityTimer();
+  appendMessage("assistant", { text: "Glad I could help — happy hiking! 🥾" });
+  endSessionOnBackend();
+  teardownAfterSessionEnd();
 }
 
 formEl.addEventListener("submit", (e) => {

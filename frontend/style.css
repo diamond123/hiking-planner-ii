@@ -221,6 +221,82 @@ body {
   margin: 0.4em 0;
 }
 
+.plan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-self: flex-start;
+  max-width: 85%;
+}
+
+.plan-action-btn {
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--accent-light);
+  color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.plan-action-btn:hover:not(:disabled) {
+  background: var(--border);
+}
+
+.plan-action-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.email-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+}
+
+.email-form input {
+  flex: 1;
+  min-width: 180px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  font-size: 0.9rem;
+  outline: none;
+}
+
+.email-form input:focus {
+  border-color: var(--accent);
+}
+
+.email-form button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 16px;
+  background: var(--accent);
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.email-form button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.email-form-cancel {
+  background: var(--accent-light) !important;
+  color: var(--accent) !important;
+}
+
+.plan-action-error {
+  width: 100%;
+  margin: 4px 0 0;
+  color: #b3261e;
+  font-size: 0.8rem;
+}
+
 .status {
   min-height: 22px;
   padding: 0 20px;

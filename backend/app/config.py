@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     backend_api_key: str
     turnstile_secret_key: str
 
+    email_user: str | None = None
+    email_pass: str | None = None
+    planning_limit: int = 3
+
     langsmith_tracing: bool = False
     langsmith_project: str = "HikingPlannerII"
     langsmith_api_key: str | None = None
