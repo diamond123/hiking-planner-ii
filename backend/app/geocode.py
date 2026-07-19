@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 
 import requests
@@ -17,9 +18,48 @@ GEOCODE_MAX_ATTEMPTS = 2
 GEOCODE_RETRY_BACKOFF_SECONDS = 1.0
 GEOCODE_REQUEST_TIMEOUT_SECONDS = 8
 
+EARTH_RADIUS_MILES = 3958.8
+
+# Clamps for the per-location geo search radius (see _radius_miles_from_bbox
+# below) - MIN keeps a specific match (a park, a street address) from
+# searching an unreasonably tiny area, MAX keeps a broad match (a whole city
+# or region) from pulling in candidates from well outside the Bay Area.
+# DEFAULT is used only if Nominatim's response is ever missing a usable
+# bounding box - the old fixed radius, kept as a safety net.
+MIN_GEO_RADIUS_MILES = 6
+MAX_GEO_RADIUS_MILES = 25
+DEFAULT_GEO_RADIUS_MILES = 15
+
+
+def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    lat1, lon1, lat2, lon2 = (math.radians(x) for x in (lat1, lon1, lat2, lon2))
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    return 2 * EARTH_RADIUS_MILES * math.asin(math.sqrt(a))
+
+
+def _radius_miles_from_bbox(boundingbox: list[str] | None) -> float:
+    """Scale the geo search radius to how broad the matched location is - a
+    specific match (a park, a street address) should search a small area
+    around it; a broad match (a whole city or region) should cast a wider
+    net so a "somewhere in San Jose"-style request isn't limited to one
+    corner of it. Nominatim's `boundingbox` (south, north, west, east) is a
+    free, already-present proxy for a match's real-world extent - its
+    diagonal is tiny for a point-like match and large for a city/region one.
+    """
+    if not boundingbox or len(boundingbox) != 4:
+        return DEFAULT_GEO_RADIUS_MILES
+    south, north, west, east = (float(x) for x in boundingbox)
+    diagonal_miles = _haversine_miles(south, west, north, east)
+    return max(MIN_GEO_RADIUS_MILES, min(MAX_GEO_RADIUS_MILES, diagonal_miles))
+
 
 def geocode_location(location_text: str) -> dict | None:
-    """Resolve free-text location to {"lat": float, "lon": float}, or None if it can't be resolved."""
+    """Resolve free-text location to {"lat": float, "lon": float, "radius_miles": float},
+    or None if it can't be resolved. `radius_miles` scales with how broad the matched
+    location is (see _radius_miles_from_bbox) and is meant for the Qdrant geo_radius filter.
+    """
     for attempt in range(1, GEOCODE_MAX_ATTEMPTS + 1):
         try:
             resp = requests.get(
@@ -38,7 +78,12 @@ def geocode_location(location_text: str) -> dict | None:
             results = resp.json()
             if not results:
                 return None
-            return {"lat": float(results[0]["lat"]), "lon": float(results[0]["lon"])}
+            result = results[0]
+            return {
+                "lat": float(result["lat"]),
+                "lon": float(result["lon"]),
+                "radius_miles": _radius_miles_from_bbox(result.get("boundingbox")),
+            }
         except Exception:
             if attempt < GEOCODE_MAX_ATTEMPTS:
                 logger.warning(

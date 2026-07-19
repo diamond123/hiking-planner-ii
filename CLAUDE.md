@@ -201,6 +201,17 @@ trail-specific search and condition checks happen after. Flow, in order:
      without the retry: `location_text` persists once normalized, and `extract_slots` re-attempts
      `geocode_location()` on *every* turn where `location_latlon` is still `None` — so the very next user
      message (even an unrelated one) retries the geocode call again.
+     `geocode_location()` returns `{"lat", "lon", "radius_miles"}` rather than just lat/lon —
+     `radius_miles` (used by `search_qdrant`'s geo filter below, not by this node) scales with how broad
+     the Nominatim match is, computed by `_radius_miles_from_bbox()` from the match's own `boundingbox`
+     (a free field Nominatim already returns): the bounding box's diagonal, in miles, clamped between
+     `MIN_GEO_RADIUS_MILES` (6) and `MAX_GEO_RADIUS_MILES` (25). A specific match (a park, a street address)
+     has a tiny bounding box and clamps to the floor; a city has a bounding box spanning its own limits and
+     lands somewhere in between or clamps to the ceiling. This means a vague "somewhere in San Jose" casts a
+     wide net without the assistant needing to ask a clarifying follow-up, while "Windy Hill Open Space
+     Preserve" searches tightly around that specific park instead of pulling in unrelated candidates from
+     15 miles away. `DEFAULT_GEO_RADIUS_MILES` (15, the old fixed value) is a safety net for the case of a
+     missing/malformed `boundingbox`, which shouldn't happen in practice since Nominatim always includes it.
    - **Preference-topic tracking**: `_extract_known_preference_topics()` regexes `preferences_text`
      against `PREFERENCE_TOPICS` (`views`/`difficulty`/`elevation_gain`/`distance` keyword lists in
      `constants.py` — `views` in particular is deliberately broad: vistas, panoramas, overlooks, coastal/
@@ -283,9 +294,11 @@ trail-specific search and condition checks happen after. Flow, in order:
    `scripts/verify_qdrant.py` as the correct model for the existing vectors — `ada-002` gives near-random
    results on this store), queries Qdrant (`search_chunk()` in `qdrant_store.py`) with `limit=10`, a
    `must_not` filter excluding `metadata.source` values already tried this turn (`excluded_sources`), and —
-   if `location_latlon` is known — a native `geo_radius` filter (`GEO_RADIUS_MILES`, in `qdrant_store.py`,
-   currently 15 miles — tight enough that a request in a disruption-heavy sub-area can exhaust most of its
-   nearby candidates quickly; see the `check_trail` note below). No payload index exists or is needed: this
+   if `location_latlon` is known — a native `geo_radius` filter using `location_latlon["radius_miles"]`,
+   which scales with how broad the geocoded match was (see the `geocode_location` note below) rather than a
+   single fixed distance — tight for a specific match, which can exhaust its nearby candidates quickly (see
+   the `check_trail` note below); `GEO_RADIUS_MILES` in `qdrant_store.py` (15) is only a fallback for the
+   unexpected case of a `location_latlon` dict with no `radius_miles` key. No payload index exists or is needed: this
    is a local on-disk Qdrant store where `create_payload_index` is a no-op, but `geo_radius` filtering still
    works correctly via brute force at this data scale (~5k points). Of the up to 10 points returned,
    `search_chunk()` picks the single best-matching *source document* (not chunk) by summing each source's
@@ -308,8 +321,9 @@ trail-specific search and condition checks happen after. Flow, in order:
    date, the judge had no anchor to weigh whether a mentioned closure (which might be stale, seasonal, or
    from a different time period) still applies to the requested date. `TRAIL_JUDGE_SYSTEM_PROMPT` explicitly
    instructs the judge to ignore closures naming a different trail/park and to default `ok=true` when a
-   closure is undated or unclear whether it still applies. Separately, note `MAX_ATTEMPTS` retries plus the
-   narrow `GEO_RADIUS_MILES` (15) mean a real cluster of nearby trails under genuine, currently-published
+   closure is undated or unclear whether it still applies. Separately, note `MAX_ATTEMPTS` retries plus a
+   narrow per-location geo radius (a specific match clamps down to `MIN_GEO_RADIUS_MILES`, 6 — see the
+   `geocode_location` note below) mean a real cluster of nearby trails under genuine, currently-published
    construction/closure notices (not a judge bug) can still produce several consecutive `ok=false` results
    before an open candidate is found or the attempts are exhausted.
 7. `fetch_document` — looks up the full document text from `backend/qdrant_data/documents.db` (a separate
@@ -329,8 +343,10 @@ checkpointer, so there's no need for mid-node human-in-the-loop pausing.
 **Module map**: `config.py` (pydantic-settings from `.env`, also calls `load_dotenv()` to populate
 `os.environ` for libraries that read env vars directly — LangSmith tracing, the Tavily wrapper),
 `constants.py` (tunable limits — `MAX_ATTEMPTS` (8), `MAX_PREFERENCE_ASKS` (2), `BAY_AREA_FALLBACK_LATLON` —
-plus the preference-topic and out-of-scope-location keyword tables; `GEO_RADIUS_MILES` (15) lives in
-`qdrant_store.py` instead, next to the search call that uses it), `llm.py` (singleton `ChatOpenAI` instances
+plus the preference-topic and out-of-scope-location keyword tables; the geo search radius isn't a single
+constant here since it's now dynamic per-location — `MIN_GEO_RADIUS_MILES`/`MAX_GEO_RADIUS_MILES` live in
+`geocode.py` next to `_radius_miles_from_bbox()`, and the `GEO_RADIUS_MILES` (15) fallback lives in
+`qdrant_store.py` next to the search call that uses it), `llm.py` (singleton `ChatOpenAI` instances
 incl. structured-output binds), `qdrant_store.py` / `geocode.py` / `db.py` / `tools.py` (external system
 access, one module each — `tools.py` now holds both the NWS weather client and the Tavily trail-conditions
 search), `schemas.py` (all Pydantic structured-output models), `prompts.py` (every system prompt / template
