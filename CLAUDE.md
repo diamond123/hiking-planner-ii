@@ -364,6 +364,12 @@ separate image file, so there's no asset to keep in sync if that emoji ever chan
   and message payload). Lines are parsed as JSON and dispatched by `type` (`status` updates the status
   line; `final` renders a new assistant bubble, markdown via `marked.parse` if present; `error` renders a
   plain-text bubble).
+- The `#status` line's busy indicator (`.status.active` in `style.css`) prefixes an ⏳ via `::before` and
+  pulses *just that emoji's opacity* (`animation: pulse` on `.status.active::before`, not on `.status.active`
+  itself) — spinning it via `transform: rotate` was tried first and discarded, since an hourglass emoji
+  isn't circularly symmetric and looks broken mid-rotation. Scoping the animation to the `::before` pseudo-
+  element specifically (rather than the whole `.status` text) keeps the status message itself readable and
+  static while it updates.
 
 **Human-verification gate (Cloudflare Turnstile)**: `index.html` has a `#turnstile-gate` overlay shown on
 load, with the main `#app` chat UI starting `hidden`. The gate's own script tag —
@@ -429,13 +435,25 @@ column squeezed very short (keyboard open on a small phone, before `#examples` g
 sent message) can have its flex children's combined min-content height exceed the available space even with
 `.messages`'s `min-height: 0` — better to clip than let content visibly spill past the pinned box.
 
-**Refocus-vs-blur on response completion**: `sendMessage()`'s `finally` block normally calls
-`inputEl.focus()` after every response, so the user can keep typing without re-tapping the input. On
-mobile this reopens the virtual keyboard, which covers the very plan text the user just asked to read.
-`handleEvent()` sets a module-level `planJustCompleted` flag to `true` when a `"final"` event has
+**Keep the input focused (and the keyboard open) across slot-filling turns**: `sendMessage()` used to set
+`inputEl.disabled = true` while awaiting the backend response, but disabling a focused element force-blurs
+it — on mobile this closed the virtual keyboard immediately on every send, and the page reflowed to fill
+the space. Re-enabling and `.focus()`-ing the input afterward from the `finally` block (an async callback,
+not a direct user gesture) isn't reliably honored by iOS Safari to reopen the keyboard, so the user had to
+manually tap the input again each turn — a jarring double layout jump per question. `sendMessage()` no
+longer disables/blurs `inputEl` at all; only the Send button is disabled during the request, and a
+module-level `isSending` flag (checked in both `sendMessage()` and the form's `submit` handler) guards
+against a duplicate submit via the keyboard's own "Go"/"Send" key while the input stays enabled. The
+`submit` handler also calls `inputEl.focus()` synchronously — still inside the click's user-gesture
+context — as insurance against browsers where tapping the on-screen Send button itself steals focus to the
+button.
+`handleEvent()` still sets a module-level `planJustCompleted` flag to `true` when a `"final"` event has
 `plan_complete: true` (and resets it to `false` at the top of `sendMessage()`, before the next request goes
-out); the `finally` block checks it and calls `inputEl.blur()` instead of `.focus()` in that case only —
-ordinary slot-filling responses (a pending question) still refocus as before.
+out); `sendMessage()`'s `finally` block checks it and calls `inputEl.blur()` in that case only — a completed
+hike plan isn't a pending question, and keeping/reopening the keyboard would cover the plan text the user
+just asked to read. Ordinary slot-filling responses keep the keyboard open throughout, right up until the
+plan completes or the session ends via inactivity (`teardownAfterSessionEnd()` disables the input then, as
+intended).
 
 **Scroll-to-top on a completed plan**: `appendMessage()` normally does `messagesEl.scrollTop =
 messagesEl.scrollHeight` after appending a bubble, so the latest message is visible at the bottom — correct
