@@ -21,19 +21,38 @@ let SEND_EMAIL_URL = "";
 // height app column upward instead of shrinking it, shoving the chat history
 // off-screen above the input. `--app-height` tracks the real visible height
 // and wins over the `dvh` fallback in style.css.
-function updateAppHeight() {
-  const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+//
+// Height alone isn't enough on iOS Safari, though: focusing the input also
+// makes Safari *pan* the visual viewport down (to keep the focused input
+// clear of the keyboard) independently of any document/element scroll -
+// `overflow: hidden` on html/body does nothing to stop it, because it isn't a
+// scroll the CSSOM sees, it's a shift of which portion of the layout
+// viewport is currently visible (`visualViewport.offsetTop`). `.app`/`.gate`
+// used to sit in normal document flow, pinned to the *layout* viewport's
+// top - so that pan slid them up and out of view by `offsetTop` pixels,
+// leaving the header scrolled off-screen and the input row sitting at the
+// very top edge under the status bar (the bug this fixes). They're now
+// `position: fixed` in style.css and translated by `--app-offset-top` to
+// cancel the pan out, keeping them pinned to the *visual* viewport instead.
+function updateViewportMetrics() {
+  const vv = window.visualViewport;
+  const height = vv ? vv.height : window.innerHeight;
+  const offsetTop = vv ? vv.offsetTop : 0;
   document.documentElement.style.setProperty("--app-height", `${height}px`);
+  document.documentElement.style.setProperty("--app-offset-top", `${offsetTop}px`);
 }
 
-updateAppHeight();
+updateViewportMetrics();
 if (window.visualViewport) {
   window.visualViewport.addEventListener("resize", () => {
-    updateAppHeight();
+    updateViewportMetrics();
     messagesEl.scrollTop = messagesEl.scrollHeight;
   });
+  // Resize alone misses the case where the pan (offsetTop) changes without a
+  // height change - e.g. the user scrolls while the keyboard is still open.
+  window.visualViewport.addEventListener("scroll", updateViewportMetrics);
 } else {
-  window.addEventListener("resize", updateAppHeight);
+  window.addEventListener("resize", updateViewportMetrics);
 }
 
 function loadApiConfig() {

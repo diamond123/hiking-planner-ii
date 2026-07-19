@@ -37,7 +37,20 @@ body {
 
 .app,
 .gate {
+  /* Fixed + centered via left:50%/translateX(-50%) rather than left in
+     normal document flow. This is what lets the translateY below cancel out
+     iOS Safari's visual-viewport pan on keyboard focus - a normal-flow
+     element is pinned to the *layout* viewport and has no way to react to
+     that pan, which is what let the header get shifted off-screen (see the
+     comment in app.js). */
+  position: fixed;
+  top: 0;
+  left: 50%;
   width: 100%;
+  /* Belt-and-suspenders: the flex column below is sized to fit exactly
+     `--app-height`/`--app-offset-top`, but clip anyway so nothing can ever
+     visually spill past the pinned box (only `.messages` should scroll). */
+  overflow: hidden;
   /* `100vh` is the *largest* possible viewport on mobile browsers (address
      bar collapsed), so it overflows the actually-visible area whenever the
      address bar is showing, pushing the header out of view. `dvh` tracks the
@@ -47,6 +60,10 @@ body {
   height: 100vh;
   height: 100dvh;
   height: var(--app-height, 100dvh);
+  /* `--app-offset-top` (set in app.js from `visualViewport.offsetTop`)
+     cancels out the keyboard-focus pan described above; it's 0px whenever
+     the pan isn't happening, so this is a no-op the rest of the time. */
+  transform: translate(-50%, var(--app-offset-top, 0px));
 }
 
 .app {

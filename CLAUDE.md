@@ -410,6 +410,25 @@ padding on `.app-header`/`.chat-form` so they clear notches/home indicators) and
 layout viewport around the keyboard directly, making the JS fallback redundant there but harmless
 elsewhere).
 
+**iOS Safari keyboard pan, on top of the height fix above**: tracking `visualViewport.height` fixes the
+*size* of the app column, but not its *position*. Focusing `#chat-input` on iOS Safari also makes Safari
+pan the visual viewport down to keep the focused input clear of the keyboard, independently of any
+document/element scroll — `overflow: hidden` on `html`/`body` doesn't stop it, since the CSSOM never sees
+it as a scroll; it's a shift in which portion of the layout viewport is currently visible
+(`visualViewport.offsetTop`). `.app`/`.gate` used to sit in normal document flow, i.e. pinned to the
+*layout* viewport's top — so that pan slid them up and off-screen by `offsetTop` pixels, landing the
+`.chat-form` input right under the status bar with the header scrolled out of view entirely. Fixed by making
+`.app`/`.gate` `position: fixed` (centered via `left: 50%` + `translate(-50%, …)` instead of relying on
+normal-flow centering, since fixed elements need explicit centering) and translating them by
+`var(--app-offset-top, 0px)` — `--app-offset-top`, set in `app.js` alongside `--app-height` from
+`visualViewport.offsetTop`, is `0px` whenever no pan is happening, making the transform a no-op the rest of
+the time. `app.js` listens to both the `visualViewport` `resize` *and* `scroll` events (not just `resize`)
+since `offsetTop` can change on its own — e.g. the user scrolls while the keyboard is still open — without a
+corresponding height change. `.app`/`.gate` also got `overflow: hidden` as a defensive clip, since a fixed
+column squeezed very short (keyboard open on a small phone, before `#examples` gets hidden by the first
+sent message) can have its flex children's combined min-content height exceed the available space even with
+`.messages`'s `min-height: 0` — better to clip than let content visibly spill past the pinned box.
+
 **Refocus-vs-blur on response completion**: `sendMessage()`'s `finally` block normally calls
 `inputEl.focus()` after every response, so the user can keep typing without re-tapping the input. On
 mobile this reopens the virtual keyboard, which covers the very plan text the user just asked to read.
