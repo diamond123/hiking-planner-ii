@@ -274,8 +274,12 @@ body {
 }
 
 .email-form input {
-  flex: 1;
-  min-width: 180px;
+  /* flex-basis: 100% forces the input onto its own full-width line (the
+     Send/Cancel buttons wrap below it) instead of squeezing into whatever's
+     left over on a shared row - the row itself is capped at 85% width (see
+     .plan-actions), so sharing space with two buttons left very little room
+     for typing an email address. */
+  flex: 1 1 100%;
   padding: 8px 12px;
   border: 1px solid var(--border);
   border-radius: 16px;
