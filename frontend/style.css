@@ -41,8 +41,15 @@ body {
      normal document flow. This is what lets the translateY below cancel out
      iOS Safari's visual-viewport pan on keyboard focus - a normal-flow
      element is pinned to the *layout* viewport and has no way to react to
-     that pan, which is what let the header get shifted off-screen (see the
-     comment in app.js). */
+     that pan. Tried dropping this in favor of plain `dvh` + the
+     `interactive-widget=resizes-content` viewport meta tag on the theory
+     that modern Safari resizes the layout viewport for the keyboard itself -
+     confirmed wrong on-device: without this compensation the keyboard pans
+     the visual viewport exactly like older iOS, and the fixed-height column
+     left chat history pushed out of bounds above the input. So both pieces
+     are load-bearing; the `--app-height`/`--app-offset-top` custom
+     properties (app.js) still need to track the *settled* value carefully -
+     see the polling comment there. */
   position: fixed;
   top: 0;
   left: 50%;

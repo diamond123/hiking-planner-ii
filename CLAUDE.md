@@ -401,20 +401,24 @@ possible viewport (address bar collapsed), so it overflows the actually-visible 
 bar is showing, pushing `.app-header` out of view; and on-screen keyboards shrink the *visual* viewport
 (`window.visualViewport`) without shrinking the *layout* viewport (`window.innerHeight`), so a
 `height: 100dvh` column doesn't reliably shrink when the keyboard opens on every browser, pushing chat
-history out of sight above the input. Fixed with three layers in `style.css`/`app.js`, each overriding the
-previous as a progressive enhancement: `.app`/`.gate` height cascades `100vh` → `100dvh` →
-`var(--app-height, 100dvh)`, where `--app-height` is set in `app.js` from `window.visualViewport.height`
-(falling back to `window.innerHeight`) and kept live via a `visualViewport` `resize` listener, which also
-re-scrolls `#messages` to bottom on every resize (keyboard open/close) and on `#chat-input` focus. `.messages`
-also needs `min-height: 0` — being a flex child that's also a scroll container, it won't shrink below its
-content size without it in some mobile browsers, growing past the `.app` column instead of scrolling
-internally. `html, body` get `overflow: hidden` so the outer document itself never scrolls/rubber-bands
-(only `#messages` should scroll) — a scrolling document was part of what let the header drift out of place.
-The viewport `<meta>` tag also sets `viewport-fit=cover` (enables `env(safe-area-inset-*)`, used for
-padding on `.app-header`/`.chat-form` so they clear notches/home indicators) and
-`interactive-widget=resizes-content` (tells supporting browsers, e.g. Chrome on Android, to resize the
-layout viewport around the keyboard directly, making the JS fallback redundant there but harmless
-elsewhere).
+history out of sight above the input. **Confirmed on-device (iOS Simulator, iPhone 16e)**: this isn't a
+solved problem in modern Safari despite the `interactive-widget=resizes-content` viewport `<meta>` tag (see
+below) — dropping the `--app-height`/`--app-offset-top` JS compensation and relying on `dvh` alone was tried
+and regressed immediately to the classic pan bug (whole page slides up on focus, fixed-height column leaves
+chat history out of bounds), so Safari here is still only panning the *visual* viewport, not resizing the
+*layout* viewport, and the JS layer below remains load-bearing. Fixed with three layers in `style.css`/
+`app.js`, each overriding the previous as a progressive enhancement: `.app`/`.gate` height cascades `100vh`
+→ `100dvh` → `var(--app-height, 100dvh)`, where `--app-height` is set in `app.js` from
+`window.visualViewport.height` (falling back to `window.innerHeight`). `.messages` also needs
+`min-height: 0` — being a flex child that's also a scroll container, it won't shrink below its content size
+without it in some mobile browsers, growing past the `.app` column instead of scrolling internally.
+`html, body` get `overflow: hidden` so the outer document itself never scrolls/rubber-bands (only
+`#messages` should scroll) — a scrolling document was part of what let the header drift out of place. The
+viewport `<meta>` tag also sets `viewport-fit=cover` (enables `env(safe-area-inset-*)`, used for padding on
+`.app-header`/`.chat-form` so they clear notches/home indicators) and `interactive-widget=resizes-content`
+(tells supporting browsers, e.g. Chrome on Android, to resize the layout viewport around the keyboard
+directly, making the JS fallback redundant there but harmless elsewhere — per the confirmation above, don't
+assume this makes the JS layer optional on Safari too).
 
 **iOS Safari keyboard pan, on top of the height fix above**: tracking `visualViewport.height` fixes the
 *size* of the app column, but not its *position*. Focusing `#chat-input` on iOS Safari also makes Safari
@@ -428,12 +432,26 @@ it as a scroll; it's a shift in which portion of the layout viewport is currentl
 normal-flow centering, since fixed elements need explicit centering) and translating them by
 `var(--app-offset-top, 0px)` — `--app-offset-top`, set in `app.js` alongside `--app-height` from
 `visualViewport.offsetTop`, is `0px` whenever no pan is happening, making the transform a no-op the rest of
-the time. `app.js` listens to both the `visualViewport` `resize` *and* `scroll` events (not just `resize`)
-since `offsetTop` can change on its own — e.g. the user scrolls while the keyboard is still open — without a
-corresponding height change. `.app`/`.gate` also got `overflow: hidden` as a defensive clip, since a fixed
-column squeezed very short (keyboard open on a small phone, before `#examples` gets hidden by the first
-sent message) can have its flex children's combined min-content height exceed the available space even with
-`.messages`'s `min-height: 0` — better to clip than let content visibly spill past the pinned box.
+the time. `.app`/`.gate` also got `overflow: hidden` as a defensive clip, since a fixed column squeezed very
+short (keyboard open on a small phone) can have its flex children's combined min-content height exceed the
+available space even with `.messages`'s `min-height: 0` — better to clip than let content visibly spill
+past the pinned box.
+
+**Settling on the real viewport value, not a transitional one mid-animation**: the keyboard/toolbar
+show-hide animation's duration isn't knowable in advance, and `visualViewport` `resize`/`scroll` events fire
+*during* that animation, not just once it's done. An earlier version read `--app-height`/`--app-offset-top`
+once per event (optionally after one fixed `setTimeout` delay) and trusted that read — confirmed on-device
+to land on a transitional value that then never got corrected, producing a gray gap where the stale height
+didn't match the real viewport, or the header scrolled off-screen with a gap opening up below the app column
+because the stale offset didn't match the real pan. `pollViewportMetricsUntilSettled()` in `app.js` replaces
+the single read with a short poll — re-reading `visualViewport.height`/`offsetTop` every 100ms for ~1s
+(`SETTLE_TICK_MS`/`SETTLE_TICKS`), comfortably outlasting every observed animation — triggered from the
+`visualViewport` `resize` and `scroll` listeners (`scroll` matters separately from `resize` since `offsetTop`
+can change on its own, e.g. the user scrolls while the keyboard is still open, without a corresponding
+height change), from `#chat-input`'s `focus`/`blur` as a backstop in case the corresponding
+`visualViewport` event is ever missed, and once at script startup to catch the address bar not yet having
+settled into its resting state at page load itself (a gray-gap/cut-off-header state observed with no
+keyboard involved at all).
 
 **Keep the input focused (and the keyboard open) across slot-filling turns**: `sendMessage()` used to set
 `inputEl.disabled = true` while awaiting the backend response, but disabling a focused element force-blurs
@@ -525,7 +543,12 @@ Clicking one calls `sendMessage()` directly with that chip's text, same as typin
 `sendMessage()` hides the section (`examplesEl.hidden = true`) the moment any message is sent, and
 `clearMessageHistory()` un-hides it again — so it reappears for a genuinely new conversation (after the
 20-minute history-clear window, or immediately if the user starts chatting again — see below) but stays out
-of the way once a conversation is underway.
+of the way once a conversation is underway. `#chat-input`'s own `focus` listener also hides it (with the
+matching `blur` listener re-showing it only if `#messages` is still empty, i.e. no message has actually been
+sent yet) — before the first message, `header + #examples + .chat-form` together can exceed the
+keyboard-shrunk `.app` height (see Mobile viewport handling above), and since `.app` clips overflow, the
+chat input itself was getting clipped by the keyboard on-device. Hiding the chips as soon as the input is
+focused, rather than waiting for the first message, guarantees the input row always has room.
 
 **Inactivity handling**: purely client-side (`app.js`) — there's no server-push channel (no WebSocket/SSE),
 so the backend can never proactively message the user; only the frontend can notice idle time via timers.

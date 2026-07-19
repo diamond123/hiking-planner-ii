@@ -28,11 +28,7 @@ let SEND_EMAIL_URL = "";
 // `overflow: hidden` on html/body does nothing to stop it, because it isn't a
 // scroll the CSSOM sees, it's a shift of which portion of the layout
 // viewport is currently visible (`visualViewport.offsetTop`). `.app`/`.gate`
-// used to sit in normal document flow, pinned to the *layout* viewport's
-// top - so that pan slid them up and out of view by `offsetTop` pixels,
-// leaving the header scrolled off-screen and the input row sitting at the
-// very top edge under the status bar (the bug this fixes). They're now
-// `position: fixed` in style.css and translated by `--app-offset-top` to
+// are `position: fixed` in style.css and translated by `--app-offset-top` to
 // cancel the pan out, keeping them pinned to the *visual* viewport instead.
 function updateViewportMetrics() {
   const vv = window.visualViewport;
@@ -42,15 +38,54 @@ function updateViewportMetrics() {
   document.documentElement.style.setProperty("--app-offset-top", `${offsetTop}px`);
 }
 
+// The keyboard/toolbar show-hide animation's actual duration isn't something
+// we can know in advance, and visualViewport resize/scroll fire *during* the
+// animation, not just once it's done - reading the value once, even after a
+// fixed delay, can land on a still-transitional value that then never gets
+// corrected (this was observed on-device: a stale height left a gray gap
+// where the real viewport didn't match, and a stale offset left the header
+// scrolled off-screen with a gap opening up below the app column). Instead
+// of guessing one "long enough" delay, poll on a short interval for about a
+// second after any viewport-changing interaction, which comfortably outlasts
+// every observed animation, and stop once that window elapses. Each tick is
+// cheap - a couple of property reads plus two CSS custom property writes.
+let settleTimer = null;
+let settleTicksLeft = 0;
+const SETTLE_TICK_MS = 100;
+const SETTLE_TICKS = 10;
+
+function pollViewportMetricsUntilSettled() {
+  settleTicksLeft = SETTLE_TICKS;
+  if (settleTimer) return;
+  settleTimer = setInterval(() => {
+    updateViewportMetrics();
+    settleTicksLeft -= 1;
+    if (settleTicksLeft <= 0) {
+      clearInterval(settleTimer);
+      settleTimer = null;
+    }
+  }, SETTLE_TICK_MS);
+}
+
 updateViewportMetrics();
+// Catches the case where the address bar hasn't finished settling into its
+// resting state at the moment this script first runs (page load itself can
+// leave the very first synchronous read transitional, matching a gray-gap/
+// cut-off-header bug seen at rest, with no keyboard involved at all).
+pollViewportMetricsUntilSettled();
+
 if (window.visualViewport) {
   window.visualViewport.addEventListener("resize", () => {
     updateViewportMetrics();
+    pollViewportMetricsUntilSettled();
     messagesEl.scrollTop = messagesEl.scrollHeight;
   });
   // Resize alone misses the case where the pan (offsetTop) changes without a
   // height change - e.g. the user scrolls while the keyboard is still open.
-  window.visualViewport.addEventListener("scroll", updateViewportMetrics);
+  window.visualViewport.addEventListener("scroll", () => {
+    updateViewportMetrics();
+    pollViewportMetricsUntilSettled();
+  });
 } else {
   window.addEventListener("resize", updateViewportMetrics);
 }
@@ -572,11 +607,33 @@ formEl.addEventListener("submit", (e) => {
 });
 
 inputEl.addEventListener("focus", () => {
-  // Give the keyboard's open animation (and the resulting visualViewport
-  // resize) a moment to finish before re-checking scroll position.
+  // Before any message has been sent, the example chips sit between the
+  // header and the chat input. With the keyboard open (shrinking the app
+  // column via `dvh`), the chips don't shrink below their own content
+  // height - header + chips + chat-form can then exceed the shrunk .app
+  // height, and since .app clips overflow, the chat input itself gets
+  // clipped by the bottom edge. Hiding the chips the moment the input is
+  // focused (rather than waiting for the first message to be sent)
+  // guarantees the input row always has room.
+  examplesEl.hidden = true;
+  // Backstop alongside the visualViewport listeners above - ties the settle
+  // poll directly to the DOM focus event in case the corresponding
+  // visualViewport resize/scroll is ever missed or fires later than this.
+  pollViewportMetricsUntilSettled();
+  // Give the keyboard's open animation a moment to finish before re-checking
+  // scroll position.
   setTimeout(() => {
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }, 300);
+});
+
+inputEl.addEventListener("blur", () => {
+  pollViewportMetricsUntilSettled();
+  // Only re-show the chips if the conversation never actually started -
+  // sendMessage() already hides them permanently once a message is sent.
+  if (messagesEl.children.length === 0) {
+    examplesEl.hidden = false;
+  }
 });
 
 document.querySelectorAll(".example-chip").forEach((chip) => {
