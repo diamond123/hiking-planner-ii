@@ -441,7 +441,7 @@ function startEmailFlow(row) {
 
   const emailInput = document.createElement("input");
   emailInput.type = "email";
-  emailInput.placeholder = "you@example.com";
+  emailInput.placeholder = "Enter your email here";
   emailInput.required = true;
   emailInput.autocomplete = "email";
 
