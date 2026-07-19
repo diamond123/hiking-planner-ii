@@ -451,9 +451,23 @@ button.
 `plan_complete: true` (and resets it to `false` at the top of `sendMessage()`, before the next request goes
 out); `sendMessage()`'s `finally` block checks it and calls `inputEl.blur()` in that case only — a completed
 hike plan isn't a pending question, and keeping/reopening the keyboard would cover the plan text the user
-just asked to read. Ordinary slot-filling responses keep the keyboard open throughout, right up until the
-plan completes or the session ends via inactivity (`teardownAfterSessionEnd()` disables the input then, as
-intended).
+just asked to read. Ordinary slot-filling responses (`ask_date`/`ask_preferences`/
+`ask_location_clarification` — none of which emit backend `"status"` events, see below) keep the keyboard
+open throughout, right up until the plan completes or the session ends via inactivity
+(`teardownAfterSessionEnd()` disables the input then, as intended).
+
+**Blurring earlier, once the graph no longer needs the user**: waiting for the `"final"` event to blur (via
+`planJustCompleted` above) meant the keyboard stayed open through the entire multi-second
+weather/search/trail-check/generate stretch of a plan-completing turn, only closing right as the plan
+appeared — a late, jarring layout jump immediately before the thing the user wanted to read. Backend
+`"status"` events (see `POST /api/chat` above) only ever fire from `search_qdrant`/`check_weather`/
+`check_trail`/`generate_plan` — i.e. only once slot-filling has fully resolved and the graph is proceeding
+on its own for the rest of the turn, with no further question pending. `handleEvent()`'s `"status"` branch
+now calls `inputEl.blur()` on every such event (harmless if already blurred), closing the keyboard as soon
+as that autonomous stretch begins rather than waiting for it to finish. This is safe even when the turn
+doesn't end in a plan (e.g. `weather_bad_response`, `exhausted_response`, `no_candidates_response` — all
+reached after at least one status event fires) because `sendMessage()`'s `finally` block still calls
+`inputEl.focus()` whenever `plan_complete` ends up false, refocusing for whatever question follows.
 
 **Scroll-to-top on a completed plan**: `appendMessage()` normally does `messagesEl.scrollTop =
 messagesEl.scrollHeight` after appending a bubble, so the latest message is visible at the bottom — correct

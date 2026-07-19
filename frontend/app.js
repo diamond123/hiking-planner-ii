@@ -373,6 +373,17 @@ async function sendMessage(text) {
 function handleEvent(evt) {
   if (evt.type === "status") {
     setStatus(evt.text);
+    // Backend "status" events (as opposed to the client-set "Thinking..."
+    // placeholder set synchronously in sendMessage()) only ever fire from
+    // search_qdrant/check_weather/check_trail/generate_plan - i.e. once
+    // slot-filling is done and the graph has everything it needs and is
+    // working autonomously for the rest of this turn. There's no reason to
+    // keep the keyboard open through that (possibly multi-second) work, so
+    // blur here instead of waiting for the final event right before the
+    // plan renders. If the turn actually ends up needing another answer
+    // (e.g. the weather check rejects the date), sendMessage()'s `finally`
+    // block already refocuses since plan_complete will be false.
+    inputEl.blur();
   } else if (evt.type === "final") {
     setStatus("");
     lastAssistantText = evt.markdown || "";
