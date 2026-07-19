@@ -106,6 +106,7 @@ let inactivityTimer = null;
 let historyClearTimer = null;
 let lastAssistantText = "";
 let planJustCompleted = false;
+let isSending = false;
 
 function clearInactivityTimer() {
   if (inactivityTimer) {
@@ -314,6 +315,8 @@ async function streamRequest(url, body) {
 }
 
 async function sendMessage(text) {
+  if (isSending) return;
+  isSending = true;
   examplesEl.hidden = true;
   clearInactivityTimer();
   planJustCompleted = false;
@@ -328,12 +331,19 @@ async function sendMessage(text) {
     appendMessage("assistant", {
       text: "Missing API key. Set API_KEY in environment or .env.",
     });
+    isSending = false;
     return;
   }
 
   appendMessage("user", { text });
   setStatus("Thinking...");
-  inputEl.disabled = true;
+  // Deliberately don't disable/blur inputEl itself here: disabling a
+  // focused element closes the mobile virtual keyboard immediately, then
+  // re-focusing it in the `finally` block below reopens it - two
+  // viewport-resize jumps per turn on iOS Safari. Only the button is
+  // disabled (to block duplicate taps); `isSending` above guards against a
+  // duplicate submit via the keyboard's "Go"/"Send" key while the input
+  // stays enabled and focused throughout the request.
   formEl.querySelector("button").disabled = true;
 
   try {
@@ -344,14 +354,17 @@ async function sendMessage(text) {
       text: err.isHttpError ? err.message : "Sorry, something went wrong reaching the server.",
     });
   } finally {
-    inputEl.disabled = false;
     formEl.querySelector("button").disabled = false;
+    isSending = false;
     if (planJustCompleted) {
       // A completed hike plan is the end of this request, not a pending
-      // question - refocusing the input would reopen the mobile virtual
-      // keyboard and cover the plan the user just asked to read.
+      // question - keeping/reopening the keyboard would cover the plan the
+      // user just asked to read.
       inputEl.blur();
     } else {
+      // Input was never blurred, so this is a no-op on most browsers, but
+      // cheap insurance in case something else (e.g. tapping the send
+      // button) stole focus during the request.
       inputEl.focus();
     }
   }
@@ -533,9 +546,17 @@ function finishSession() {
 
 formEl.addEventListener("submit", (e) => {
   e.preventDefault();
+  if (isSending) return;
   const text = inputEl.value.trim();
   if (!text) return;
   inputEl.value = "";
+  // Tapping the on-screen Send button (rather than the keyboard's own "Go"/
+  // "Send" key) can steal focus to the button in some browsers, closing the
+  // virtual keyboard. Re-focus synchronously, still inside this user-gesture
+  // handler, so iOS Safari treats it as gesture-connected and keeps/reopens
+  // the keyboard - a `.focus()` called later from an async response handler
+  // isn't reliably treated the same way.
+  inputEl.focus();
   sendMessage(text);
 });
 

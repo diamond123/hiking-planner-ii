@@ -328,6 +328,14 @@ body {
 
 .status.active::before {
   content: "⏳ ";
+  display: inline-block;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.45;
+  }
 }
 
 .chat-form {
