@@ -326,6 +326,12 @@ body {
   color: var(--muted);
 }
 
+/* No status text (e.g. right after a plan is rendered) - collapse the line
+   entirely instead of leaving an empty 22px bar blocking the view. */
+.status:not(.active) {
+  display: none;
+}
+
 .status.active::before {
   content: "⏳ ";
   display: inline-block;
