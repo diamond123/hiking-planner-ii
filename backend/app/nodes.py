@@ -70,6 +70,18 @@ def _strip_location_filler(location_text: str) -> str:
     return cleaned or location_text
 
 
+# Document `title` metadata is either "{trailhead/trail segment}, {park/preserve
+# name}" (e.g. "Resolution Loop, El Corte de Madera Creek Open Space Preserve")
+# or just "{park/preserve name}" alone, with at most one comma across the whole
+# corpus - checked directly against documents.db. Bolding "the trail/park name"
+# was previously left for the plan-writer LLM to figure out from the raw title
+# string, which regularly bolded the trail segment (before the comma) instead
+# of the park name the user actually cares about - splitting it deterministically
+# here removes that ambiguity instead of hoping the LLM parses it correctly.
+def _park_name_from_title(title: str) -> str:
+    return title.split(",", 1)[-1].strip()
+
+
 def _normalize_or_reject_location(location_text: str) -> tuple[str, bool]:
     normalized = location_text.strip()
     lowered = normalized.lower()
@@ -577,6 +589,7 @@ def generate_plan(state: HikingState) -> dict:
 
     human_content = (
         f"Trail: {md['title']}\n"
+        f"Park/preserve name to bold in the Summary: {_park_name_from_title(md['title'])}\n"
         f"Hiking date: {state['hiking_date']}\n"
         f"User preferences: {state.get('preferences_text') or 'none specified'}\n\n"
         f"Weather conditions: {state['weather_result']['reason']}\n\n"
