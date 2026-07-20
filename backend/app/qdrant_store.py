@@ -1,9 +1,12 @@
 import random
+import logging
+logger = logging.getLogger(__name__)
 from langchain_openai import OpenAIEmbeddings
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, GeoPoint, GeoRadius, MatchAny
 
 from app.config import settings
+from app.db import get_sources_with_prefix
 
 _client = QdrantClient(path=settings.qdrant_full_path)
 _embeddings = OpenAIEmbeddings(model=settings.embedding_model, api_key=settings.openai_api_key)
@@ -31,6 +34,8 @@ def search_chunk(
     must = []
     if location_latlon:
         radius_miles = location_latlon.get("radius_miles", GEO_RADIUS_MILES)
+        # radius_miles = max(radius_miles, GEO_RADIUS_MILES)  # never search a smaller area than the fallback
+        logger.info(f"search_chunk: query_text={query_text}, location_latlon={location_latlon}, radius_miles={radius_miles}")
         must.append(
             FieldCondition(
                 key="metadata.location",
@@ -40,6 +45,16 @@ def search_chunk(
                 ),
             )
         )
+        source_prefix = location_latlon.get("source_prefix")
+        if source_prefix:
+            # Set by a BAY_AREA_REGION_OVERRIDES match (geocode.py) - the geo_radius
+            # above alone can't keep e.g. "South Bay" from reaching across the Bay's
+            # narrow crossings into East Bay parks, since the radius also has to be
+            # wide enough to cover genuinely-distant same-region hikes. This filters
+            # to the source site's own regional folder instead of trusting distance.
+            prefixed_sources = get_sources_with_prefix(source_prefix)
+            if prefixed_sources:
+                must.append(FieldCondition(key="metadata.source", match=MatchAny(any=prefixed_sources)))
 
     query_filter = Filter(must=must or None, must_not=must_not or None)
 
@@ -47,7 +62,7 @@ def search_chunk(
         collection_name=settings.qdrant_collection_name,
         query=vector,
         query_filter=query_filter,
-        limit=6,
+        limit=10,
     ).points
 
     if not results:
@@ -55,7 +70,11 @@ def search_chunk(
     
     # L3 Norm
     scores = [result.score ** 3 for result in results]
+    # sources = [result.payload.get("metadata", {}).get("source", "unknown") for result in results]
+    # formatted_scores = [(source, f"{score:.3f}") for source, score in zip(sources, scores)]
+    # logger.info(f"scores={formatted_scores}")
     total_score = sum(scores)
+    
     choice = random.uniform(0, total_score)
     for i, score in enumerate(scores):
         choice -= score

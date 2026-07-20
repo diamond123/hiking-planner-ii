@@ -8,7 +8,11 @@ MAX_DATE_DAYS_AHEAD = 365
 # considered too late to have enough daylight/time left.
 SAME_DAY_CUTOFF_HOUR = 16
 
-BAY_AREA_FALLBACK_LATLON = {"lat": 37.7749, "lon": -122.4194}
+# Redwood City/Redwood Shores - more geographically central to where this app's
+# hike corpus actually is than downtown SF (only ~12 of ~289 documents are
+# sfhikes/*), and avoids SF's distinctly cooler/foggier microclimate biasing the
+# up-front weather check for what will likely be a non-SF candidate trail.
+BAY_AREA_FALLBACK_LATLON = {"lat": 37.538612, "lon": -122.241279}
 
 PREFERENCE_TOPICS = {
     "views": [

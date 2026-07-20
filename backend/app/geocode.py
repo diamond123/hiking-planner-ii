@@ -1,5 +1,6 @@
 import logging
 import math
+import re
 import time
 
 import requests
@@ -29,6 +30,55 @@ EARTH_RADIUS_MILES = 3958.8
 MIN_GEO_RADIUS_MILES = 6
 MAX_GEO_RADIUS_MILES = 25
 DEFAULT_GEO_RADIUS_MILES = 15
+
+# "East Bay"/"South Bay"/"North Bay"/"Peninsula" are colloquial multi-city Bay
+# Area sub-regions with no corresponding OSM polygon, so Nominatim can't return
+# a real match for them - it falls back to scoring unrelated same-named point
+# features (e.g. a literal road named "East Bay" near Stockton, a "South Bay"
+# water inlet in SF, "Peninsula Temple Sholom" in Burlingame), each with a
+# sub-mile bounding box. That silently produces a MIN_GEO_RADIUS_MILES search
+# centered on the wrong place. Hardcode centers/radii for these names instead
+# of trusting Nominatim for them.
+#
+# `radius_miles` alone isn't enough to keep candidates within the right
+# region, though: the Bay's narrow crossings (Dumbarton, San Mateo bridges)
+# put East Bay parks within ~15-19mi of these centers, well inside a radius
+# sized to also reach genuinely-distant same-region hikes (e.g. the Santa
+# Cruz Mountains preserves that make up much of "South Bay"'s own document
+# set are 15-20mi from downtown San Jose in the *other* direction) - so
+# shrinking the radius to exclude cross-bay contamination would gut real
+# same-region results rather than fix the problem. `source_prefix` is a much
+# more precise filter for this: the document corpus was scraped from a site
+# organized into exactly these region folders (see documents.db `source`,
+# e.g. "eastbayhikes%2Fpleasanton.html") - search_qdrant uses it as a hard
+# `metadata.source` filter, keyed by the source site's own regional
+# categorization rather than straight-line distance.
+BAY_AREA_REGION_OVERRIDES: dict[str, dict[str, float | str]] = {
+    "east bay": {"lat": 37.8272, "lon": -122.0538, "radius_miles": 20.0, "source_prefix": "eastbayhikes"},
+    "south bay": {"lat": 37.3382, "lon": -121.8863, "radius_miles": 20.0, "source_prefix": "southbayhikes"},
+    "north bay": {"lat": 38.2919, "lon": -122.4580, "radius_miles": 25.0, "source_prefix": "northbayhikes"},
+    "peninsula": {"lat": 37.4852, "lon": -122.2364, "radius_miles": 15.0, "source_prefix": "southbayhikes"},
+}
+
+_REGION_ALIAS_LEADING_THE_RE = re.compile(r"^the\s+", re.IGNORECASE)
+_REGION_ALIAS_STATE_COUNTRY_RE = re.compile(
+    r",?\s*(?:california|ca|usa|u\.s\.a\.?|united states|us)\b", re.IGNORECASE
+)
+_REGION_ALIAS_TRAILING_WORD_RE = re.compile(r"\s+(?:area|region)\b", re.IGNORECASE)
+
+
+def _match_bay_area_region(location_text: str) -> dict[str, float] | None:
+    """Match location_text against BAY_AREA_REGION_OVERRIDES, tolerant of
+    normalization already applied upstream (a leading "the ", an appended
+    ", California, USA", a trailing "Area"/"Region"). Requires the whole
+    (stripped) string to match a known alias, not just contain it as a
+    substring - otherwise a real, more specific place like "Point Reyes
+    Peninsula" would be wrongly swallowed by the generic "peninsula" override.
+    """
+    stripped = _REGION_ALIAS_LEADING_THE_RE.sub("", location_text.strip())
+    stripped = _REGION_ALIAS_STATE_COUNTRY_RE.sub("", stripped)
+    stripped = _REGION_ALIAS_TRAILING_WORD_RE.sub("", stripped)
+    return BAY_AREA_REGION_OVERRIDES.get(stripped.strip(" ,").lower())
 
 
 def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -60,6 +110,10 @@ def geocode_location(location_text: str) -> dict | None:
     or None if it can't be resolved. `radius_miles` scales with how broad the matched
     location is (see _radius_miles_from_bbox) and is meant for the Qdrant geo_radius filter.
     """
+    region_override = _match_bay_area_region(location_text)
+    if region_override is not None:
+        return dict(region_override)
+
     for attempt in range(1, GEOCODE_MAX_ATTEMPTS + 1):
         try:
             resp = requests.get(
