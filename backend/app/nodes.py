@@ -570,22 +570,52 @@ def exhausted_response(state: HikingState) -> dict:
     return {"messages": [AIMessage(content=EXHAUSTED_MESSAGE)]}
 
 
+# Built deterministically rather than left to plan_writer_llm to reproduce -
+# it runs at temperature=0.4 (see llm.py) for natural-sounding prose elsewhere
+# in the plan, which made it an unreliable copyist for this section: asked to
+# repeat an "Address"/"Google Maps link"/"Apple Maps link" block "EXACTLY as
+# given, character-for-character", it would sometimes silently drop the Apple
+# Maps link (or reformat the block) rather than reproduce it verbatim. Same
+# rationale as _park_name_from_title - don't trust LLM compliance for data
+# that's already fully known in code.
+_GETTING_THERE_HEADING = "## Getting There"
+
+
+def _build_getting_there_section(md: dict) -> str:
+    location = md.get("location")
+    if not (location and location.get("lat") and location.get("lon")):
+        return f"{_GETTING_THERE_HEADING}\nAn address and map links aren't available for this location.\n"
+
+    lat, lon = location["lat"], location["lon"]
+    address = reverse_geocode_latlon(float(lat), float(lon))
+    address_line = address or "an address isn't available for this location"
+    return (
+        f"{_GETTING_THERE_HEADING}\n"
+        f"Address: {address_line}  \n"
+        f"<a href=\"https://www.google.com/maps/search/?api=1&query={lat},{lon}\" target=\"_blank\">Google Maps link to starting point</a>  \n"
+        f"<a href=\"https://maps.apple.com/?ll={lat},{lon}&q=Starting+Point\" target=\"_blank\">Apple Maps link to starting point</a>\n"
+    )
+
+
+def _insert_getting_there_section(plan_body: str, getting_there_section: str) -> str:
+    # Spliced in right before "## Weather Conditions" to match the section order
+    # GENERATE_PLAN_SYSTEM_PROMPT still asks for (Summary, Trail Sequence,
+    # Parking, [Getting There], Weather Conditions, Trail Conditions). Falls back
+    # to appending at the end if that heading is ever missing, so the section is
+    # never silently lost even if the LLM deviates from the expected structure.
+    marker = "## Weather Conditions"
+    idx = plan_body.find(marker)
+    if idx == -1:
+        return f"{plan_body.rstrip()}\n\n{getting_there_section}"
+    return f"{plan_body[:idx]}{getting_there_section}\n{plan_body[idx:]}"
+
+
 def generate_plan(state: HikingState) -> dict:
     writer = get_stream_writer()
     writer({"type": "status", "text": "Preparing your hiking plan..."})
 
     md = state["candidate_chunk"]["metadata"]
-    location = md.get("location")
-    if location and location.get("lat") and location.get("lon"):
-        lat, lon = location["lat"], location["lon"]
-        address = reverse_geocode_latlon(float(lat), float(lon))
-        gps_info = (
-            f"Address: {address or 'not available'}\n"
-            f"<a href=\"https://www.google.com/maps/search/?api=1&query={lat},{lon}\" target=\"_blank\">Google Maps link to starting point</a>"
-            # f"[Google Maps link to starting point](https://www.google.com/maps/search/?api=1&query={lat},{lon})"
-        )
-    else:
-        gps_info = "Address: not available\nGoogle Maps link to starting point: not available"
+    getting_there_section = _build_getting_there_section(md)
 
     human_content = (
         f"Trail: {md['title']}\n"
@@ -594,13 +624,13 @@ def generate_plan(state: HikingState) -> dict:
         f"User preferences: {state.get('preferences_text') or 'none specified'}\n\n"
         f"Weather conditions: {state['weather_result']['reason']}\n\n"
         f"Trail conditions: {state['trail_result']['reason']}\n\n"
-        f"{gps_info}\n\n"
         f"Document content:\n{state['candidate_document']}"
     )
     response = plan_writer_llm.invoke(
         [SystemMessage(content=GENERATE_PLAN_SYSTEM_PROMPT), HumanMessage(content=human_content)]
     )
-    markdown = f"{PLAN_READY_MESSAGE}\n\n{response.content}"
+    plan_body = _insert_getting_there_section(response.content, getting_there_section)
+    markdown = f"{PLAN_READY_MESSAGE}\n\n{plan_body}"
 
     plan_source_history = list(state.get("plan_source_history") or [])
     plan_source_history.append(md["source"])
