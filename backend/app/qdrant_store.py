@@ -3,7 +3,7 @@ import logging
 logger = logging.getLogger(__name__)
 from langchain_openai import OpenAIEmbeddings
 from qdrant_client import QdrantClient
-from qdrant_client.models import FieldCondition, Filter, GeoPoint, GeoRadius, MatchAny
+from qdrant_client.models import FieldCondition, Filter, GeoBoundingBox, GeoPoint, MatchAny
 
 from app.config import settings
 from app.db import get_sources_with_prefix
@@ -11,12 +11,12 @@ from app.db import get_sources_with_prefix
 _client = QdrantClient(path=settings.qdrant_full_path)
 _embeddings = OpenAIEmbeddings(model=settings.embedding_model, api_key=settings.openai_api_key)
 
-MILES_TO_METERS = 1609.34
-# Fallback only - used if location_latlon has no "radius_miles" (e.g. a
-# manually-constructed dict rather than one from geocode_location()). The
-# real per-location value is computed in geocode.py from how broad the
-# geocoded match is - see _radius_miles_from_bbox there.
-GEO_RADIUS_MILES = 15
+# Fallback only - used if location_latlon has no "bbox" (e.g. a manually-
+# constructed dict rather than one from geocode_location()). A plain square in
+# degrees rather than the latitude-adjusted math in geocode.py's
+# _bbox_around_point - this path is a safety net, not expected to be hit in
+# practice, so precise longitude scaling isn't worth it here.
+FALLBACK_BBOX_HALF_DEGREES = 0.2  # ~14 miles
 
 
 def search_chunk(
@@ -33,15 +33,22 @@ def search_chunk(
 
     must = []
     if location_latlon:
-        radius_miles = location_latlon.get("radius_miles", GEO_RADIUS_MILES)
-        # radius_miles = max(radius_miles, GEO_RADIUS_MILES)  # never search a smaller area than the fallback
-        logger.info(f"search_chunk: query_text={query_text}, location_latlon={location_latlon}, radius_miles={radius_miles}")
+        bbox = location_latlon.get("bbox")
+        if not bbox:
+            lat0, lon0 = location_latlon["lat"], location_latlon["lon"]
+            bbox = {
+                "south": lat0 - FALLBACK_BBOX_HALF_DEGREES,
+                "north": lat0 + FALLBACK_BBOX_HALF_DEGREES,
+                "west": lon0 - FALLBACK_BBOX_HALF_DEGREES,
+                "east": lon0 + FALLBACK_BBOX_HALF_DEGREES,
+            }
+        logger.info(f"search_chunk: query_text={query_text}, location_latlon={location_latlon}, bbox={bbox}")
         must.append(
             FieldCondition(
                 key="metadata.location",
-                geo_radius=GeoRadius(
-                    center=GeoPoint(lat=location_latlon["lat"], lon=location_latlon["lon"]),
-                    radius=radius_miles * MILES_TO_METERS,
+                geo_bounding_box=GeoBoundingBox(
+                    top_left=GeoPoint(lat=bbox["north"], lon=bbox["west"]),
+                    bottom_right=GeoPoint(lat=bbox["south"], lon=bbox["east"]),
                 ),
             )
         )

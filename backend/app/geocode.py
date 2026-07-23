@@ -20,44 +20,59 @@ GEOCODE_RETRY_BACKOFF_SECONDS = 1.0
 GEOCODE_REQUEST_TIMEOUT_SECONDS = 8
 
 EARTH_RADIUS_MILES = 3958.8
+MILES_PER_DEGREE_LAT = math.radians(1) * EARTH_RADIUS_MILES  # ~69.1 miles, latitude-independent
 
-# Clamps for the per-location geo search radius (see _radius_miles_from_bbox
-# below) - MIN keeps a specific match (a park, a street address) from
-# searching an unreasonably tiny area, MAX keeps a broad match (a whole city
-# or region) from pulling in candidates from well outside the Bay Area.
-# DEFAULT is used only if Nominatim's response is ever missing a usable
-# bounding box - the old fixed radius, kept as a safety net.
-MIN_GEO_RADIUS_MILES = 6
-MAX_GEO_RADIUS_MILES = 25
-DEFAULT_GEO_RADIUS_MILES = 15
+# Clamps for the per-location geo search box (see _bbox_around_point below) -
+# MIN keeps a specific match (a park, a street address) from searching an
+# unreasonably tiny area, MAX keeps a broad match (a whole city or region)
+# from pulling in candidates from well outside the Bay Area. DEFAULT is used
+# only if Nominatim's response is ever missing a usable bounding box.
+MIN_BBOX_SIDE_MILES = 12
+MAX_BBOX_SIDE_MILES = 50
+DEFAULT_BBOX_SIDE_MILES = 30
 
 # "East Bay"/"South Bay"/"North Bay"/"Peninsula" are colloquial multi-city Bay
 # Area sub-regions with no corresponding OSM polygon, so Nominatim can't return
 # a real match for them - it falls back to scoring unrelated same-named point
 # features (e.g. a literal road named "East Bay" near Stockton, a "South Bay"
 # water inlet in SF, "Peninsula Temple Sholom" in Burlingame), each with a
-# sub-mile bounding box. That silently produces a MIN_GEO_RADIUS_MILES search
-# centered on the wrong place. Hardcode centers/radii for these names instead
-# of trusting Nominatim for them.
+# sub-mile bounding box. That silently produces a MIN_BBOX_SIDE_MILES search
+# centered on the wrong place. Hardcode centers/boxes for these names instead
+# of trusting Nominatim for them - boxes drawn by hand to roughly track each
+# region's own geography (e.g. East Bay's west edge stops at the shoreline
+# rather than crossing the water) rather than derived from any real match.
 #
-# `radius_miles` alone isn't enough to keep candidates within the right
-# region, though: the Bay's narrow crossings (Dumbarton, San Mateo bridges)
-# put East Bay parks within ~15-19mi of these centers, well inside a radius
-# sized to also reach genuinely-distant same-region hikes (e.g. the Santa
-# Cruz Mountains preserves that make up much of "South Bay"'s own document
-# set are 15-20mi from downtown San Jose in the *other* direction) - so
-# shrinking the radius to exclude cross-bay contamination would gut real
-# same-region results rather than fix the problem. `source_prefix` is a much
-# more precise filter for this: the document corpus was scraped from a site
-# organized into exactly these region folders (see documents.db `source`,
-# e.g. "eastbayhikes%2Fpleasanton.html") - search_qdrant uses it as a hard
-# `metadata.source` filter, keyed by the source site's own regional
-# categorization rather than straight-line distance.
-BAY_AREA_REGION_OVERRIDES: dict[str, dict[str, float | str]] = {
-    "east bay": {"lat": 37.8272, "lon": -122.0538, "radius_miles": 20.0, "source_prefix": "eastbayhikes"},
-    "south bay": {"lat": 37.3382, "lon": -121.8863, "radius_miles": 20.0, "source_prefix": "southbayhikes"},
-    "north bay": {"lat": 38.2919, "lon": -122.4580, "radius_miles": 25.0, "source_prefix": "northbayhikes"},
-    "peninsula": {"lat": 37.4852, "lon": -122.2364, "radius_miles": 15.0, "source_prefix": "southbayhikes"},
+# The box alone still isn't a perfect boundary - a rectangle can't trace a
+# county line - so `source_prefix` backstops it: the document corpus was
+# scraped from a site organized into exactly these region folders (see
+# documents.db `source`, e.g. "eastbayhikes%2Fpleasanton.html") - search_qdrant
+# uses it as a hard `metadata.source` filter, keyed by the source site's own
+# regional categorization rather than geography at all. That's what actually
+# guarantees an East Bay park can never surface for a "South Bay" request;
+# the box just keeps the two overrides' candidate pools distinct even though
+# "south bay" and "peninsula" share the same source_prefix (the source site
+# doesn't split Peninsula out from South Bay into its own folder).
+BAY_AREA_REGION_OVERRIDES: dict[str, dict] = {
+    "east bay": {
+        "lat": 37.8272, "lon": -122.0538,
+        "bbox": {"south": 37.45, "north": 38.05, "west": -122.40, "east": -121.40},
+        "source_prefix": "eastbayhikes",
+    },
+    "south bay": {
+        "lat": 37.3382, "lon": -121.8863,
+        "bbox": {"south": 36.95, "north": 37.45, "west": -122.15, "east": -121.45},
+        "source_prefix": "southbayhikes",
+    },
+    "north bay": {
+        "lat": 38.2919, "lon": -122.4580,
+        "bbox": {"south": 37.95, "north": 38.75, "west": -123.20, "east": -122.00},
+        "source_prefix": "northbayhikes",
+    },
+    "peninsula": {
+        "lat": 37.4852, "lon": -122.2364,
+        "bbox": {"south": 37.30, "north": 37.70, "west": -122.55, "east": -122.05},
+        "source_prefix": "southbayhikes",
+    },
 }
 
 _REGION_ALIAS_LEADING_THE_RE = re.compile(r"^the\s+", re.IGNORECASE)
@@ -67,7 +82,7 @@ _REGION_ALIAS_STATE_COUNTRY_RE = re.compile(
 _REGION_ALIAS_TRAILING_WORD_RE = re.compile(r"\s+(?:area|region)\b", re.IGNORECASE)
 
 
-def _match_bay_area_region(location_text: str) -> dict[str, float] | None:
+def _match_bay_area_region(location_text: str) -> dict | None:
     """Match location_text against BAY_AREA_REGION_OVERRIDES, tolerant of
     normalization already applied upstream (a leading "the ", an appended
     ", California, USA", a trailing "Area"/"Region"). Requires the whole
@@ -81,34 +96,53 @@ def _match_bay_area_region(location_text: str) -> dict[str, float] | None:
     return BAY_AREA_REGION_OVERRIDES.get(stripped.strip(" ,").lower())
 
 
-def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    lat1, lon1, lat2, lon2 = (math.radians(x) for x in (lat1, lon1, lat2, lon2))
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
-    return 2 * EARTH_RADIUS_MILES * math.asin(math.sqrt(a))
+def _miles_per_degree_lon(lat: float) -> float:
+    return MILES_PER_DEGREE_LAT * math.cos(math.radians(lat))
 
 
-def _radius_miles_from_bbox(boundingbox: list[str] | None) -> float:
-    """Scale the geo search radius to how broad the matched location is - a
-    specific match (a park, a street address) should search a small area
-    around it; a broad match (a whole city or region) should cast a wider
-    net so a "somewhere in San Jose"-style request isn't limited to one
-    corner of it. Nominatim's `boundingbox` (south, north, west, east) is a
-    free, already-present proxy for a match's real-world extent - its
-    diagonal is tiny for a point-like match and large for a city/region one.
+def _bbox_around_point(lat: float, lon: float, boundingbox: list[str] | None) -> dict:
+    """Build a {"south", "north", "west", "east"} search box centered on
+    (lat, lon), sized to how broad the matched location is - a specific match
+    (a park, a street address) should search a small area around it; a broad
+    match (a whole city or region) should cast a wider net so a "somewhere in
+    San Jose"-style request isn't limited to one corner of it. Nominatim's
+    `boundingbox` (south, north, west, east) is a free, already-present proxy
+    for a match's real-world extent, used directly here rather than collapsed
+    into a single circle-defining radius: taking a bbox's corner-to-corner
+    diagonal as a radius from its center overstates the area by roughly 2x
+    (the true center-to-corner distance is half the diagonal), which is how a
+    plain city match like "Fremont" was reaching clear across the Bay into
+    Cupertino. Each dimension is clamped independently between
+    MIN_BBOX_SIDE_MILES and MAX_BBOX_SIDE_MILES.
     """
-    if not boundingbox or len(boundingbox) != 4:
-        return DEFAULT_GEO_RADIUS_MILES
-    south, north, west, east = (float(x) for x in boundingbox)
-    diagonal_miles = _haversine_miles(south, west, north, east)
-    return max(MIN_GEO_RADIUS_MILES, min(MAX_GEO_RADIUS_MILES, diagonal_miles))
+    miles_per_deg_lon = _miles_per_degree_lon(lat) or MILES_PER_DEGREE_LAT
+
+    if boundingbox and len(boundingbox) == 4:
+        south, north, west, east = (float(x) for x in boundingbox)
+        height_miles = (north - south) * MILES_PER_DEGREE_LAT
+        width_miles = (east - west) * miles_per_deg_lon
+    else:
+        height_miles = width_miles = DEFAULT_BBOX_SIDE_MILES
+
+    height_miles = max(MIN_BBOX_SIDE_MILES, min(MAX_BBOX_SIDE_MILES, height_miles))
+    width_miles = max(MIN_BBOX_SIDE_MILES, min(MAX_BBOX_SIDE_MILES, width_miles))
+
+    half_lat_deg = (height_miles / 2) / MILES_PER_DEGREE_LAT
+    half_lon_deg = (width_miles / 2) / miles_per_deg_lon
+
+    return {
+        "south": lat - half_lat_deg,
+        "north": lat + half_lat_deg,
+        "west": lon - half_lon_deg,
+        "east": lon + half_lon_deg,
+    }
 
 
 def geocode_location(location_text: str) -> dict | None:
-    """Resolve free-text location to {"lat": float, "lon": float, "radius_miles": float},
-    or None if it can't be resolved. `radius_miles` scales with how broad the matched
-    location is (see _radius_miles_from_bbox) and is meant for the Qdrant geo_radius filter.
+    """Resolve free-text location to {"lat": float, "lon": float, "bbox": dict},
+    or None if it can't be resolved. `bbox` (see _bbox_around_point) scales with
+    how broad the matched location is and is meant for the Qdrant geo_bounding_box
+    filter.
     """
     region_override = _match_bay_area_region(location_text)
     if region_override is not None:
@@ -133,10 +167,11 @@ def geocode_location(location_text: str) -> dict | None:
             if not results:
                 return None
             result = results[0]
+            lat, lon = float(result["lat"]), float(result["lon"])
             return {
-                "lat": float(result["lat"]),
-                "lon": float(result["lon"]),
-                "radius_miles": _radius_miles_from_bbox(result.get("boundingbox")),
+                "lat": lat,
+                "lon": lon,
+                "bbox": _bbox_around_point(lat, lon, result.get("boundingbox")),
             }
         except Exception:
             if attempt < GEOCODE_MAX_ATTEMPTS:
