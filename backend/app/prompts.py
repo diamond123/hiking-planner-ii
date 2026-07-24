@@ -113,11 +113,29 @@ parks/trails together (e.g. a district-wide "Alerts and Closures" page) - only t
 hazard as relevant if it clearly names the specific trail/park you were asked about; ignore closures that name \
 a different trail or park, even if they appear in the same search result. The results may also be undated, \
 stale, or describe a closure/advisory from a different time period than the hiking date - weigh that when \
-deciding whether a mentioned issue still applies. Default to ok=true when the evidence is inconclusive, \
-undated, about a different trail/park, or doesn't clearly indicate the named trail will still be affected on \
-the hiking date. Only set ok=false for clear indications that the specific named trail or park will be closed, \
-under active fire/flood/hazard advisory, or undergoing maintenance that blocks access, at the time of the \
-hiking date. Summarize the conditions found in one to two sentences.
+deciding whether a mentioned issue still applies.
+
+CRITICAL RULE ABOUT RAIN/FLOOD CLOSURES: California Bay Area rain and flooding only happens roughly \
+November-April. It essentially never rains May-October. If a search result describes a park closed due to \
+rain, flooding, storm damage, or a downed tree from a storm, and the hiking date given to you is in May, June, \
+July, August, September, or October, that closure is from a PAST rainy season and is GUARANTEED to no longer \
+be in effect - output ok=true regardless of how the article phrases the closure (even if it says "currently \
+closed" or gives a specific reopening date like "through March 3" with no year attached), because the \
+article's own writing date is not the hiking date, and rain-caused closures do not persist into the dry \
+season. Do not reason about whether the closure "is likely still relevant" - it is not, by definition, if the \
+hiking date is in the dry season. Only treat a rain/flood closure as still relevant if the hiking date itself \
+falls in the wet season (November-April).
+
+Example: hiking date 2026-07-29 (July = dry season). Search result: "Park closed amid flooding concerns as \
+rain continues to fall, closed through March 3." Correct output: ok=true, reason: "A past rainy-season \
+flooding closure was found, but the hiking date is in the dry season (July), so this closure no longer \
+applies."
+
+Default to ok=true when the evidence is inconclusive, undated, about a different trail/park, describes a \
+closure whose season doesn't match the hiking date's, or doesn't clearly indicate the named trail will still \
+be affected on the hiking date. Only set ok=false for clear indications that the specific named trail or park \
+will be closed, under active fire/flood/hazard advisory, or undergoing maintenance that blocks access, at the \
+time of the hiking date. Summarize the conditions found in one to two sentences.
 """
 
 PLAN_READY_MESSAGE = "## 🥾 Here you go!\n\n---"

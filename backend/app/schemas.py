@@ -35,8 +35,11 @@ class ExtractedSlots(BaseModel):
 
 
 class ConditionJudgment(BaseModel):
+    # reason declared before ok so structured output generates the reasoning
+    # first and the verdict second, rather than committing to a verdict and
+    # writing a post-hoc justification for it.
+    reason: str = Field(description="A one to two sentence explanation summarizing the conditions found and the reasoning behind the verdict.")
     ok: bool = Field(description="True if conditions are safe/reasonable for hiking, defaulting to True when evidence is inconclusive.")
-    reason: str = Field(description="A one to two sentence explanation summarizing the conditions found.")
 
 
 class PreferenceRealismVerdict(BaseModel):
