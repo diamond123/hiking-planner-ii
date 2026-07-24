@@ -7,6 +7,7 @@ from qdrant_client.models import FieldCondition, Filter, GeoBoundingBox, GeoPoin
 
 from app.config import settings
 from app.db import get_sources_with_prefix
+from app.geocode import widen_bbox
 
 _client = QdrantClient(path=settings.qdrant_full_path)
 _embeddings = OpenAIEmbeddings(model=settings.embedding_model, api_key=settings.openai_api_key)
@@ -17,6 +18,27 @@ _embeddings = OpenAIEmbeddings(model=settings.embedding_model, api_key=settings.
 # _bbox_around_point - this path is a safety net, not expected to be hit in
 # practice, so precise longitude scaling isn't worth it here.
 FALLBACK_BBOX_HALF_DEGREES = 0.2  # ~14 miles
+
+# Start each search at its natural box size (geocode.py's MIN_BBOX_SIDE_MILES
+# floor, tight enough to keep e.g. Fremont from reaching into the South Bay -
+# see geocode.py) and only widen it if that size turns up zero candidates.
+# This is a dynamic range rather than a single static floor: a small town like
+# Livermore, whose own bbox holds only one nearby document, gets to cast a
+# wider net once that document is excluded/rejected, while a city like
+# Fremont - which has plenty of real nearby candidates and so never exhausts
+# its natural box - never widens at all, and never risks pulling in a
+# same-named-but-unrelated candidate from across the Bay.
+GEO_WIDEN_FACTORS = (1.0, 2.0, 4.0)
+
+
+def _default_bbox(location_latlon: dict) -> dict:
+    lat0, lon0 = location_latlon["lat"], location_latlon["lon"]
+    return {
+        "south": lat0 - FALLBACK_BBOX_HALF_DEGREES,
+        "north": lat0 + FALLBACK_BBOX_HALF_DEGREES,
+        "west": lon0 - FALLBACK_BBOX_HALF_DEGREES,
+        "east": lon0 + FALLBACK_BBOX_HALF_DEGREES,
+    }
 
 
 def search_chunk(
@@ -31,46 +53,52 @@ def search_chunk(
     if excluded_sources:
         must_not.append(FieldCondition(key="metadata.source", match=MatchAny(any=excluded_sources)))
 
-    must = []
+    static_must = []
+    base_bbox = None
     if location_latlon:
-        bbox = location_latlon.get("bbox")
-        if not bbox:
-            lat0, lon0 = location_latlon["lat"], location_latlon["lon"]
-            bbox = {
-                "south": lat0 - FALLBACK_BBOX_HALF_DEGREES,
-                "north": lat0 + FALLBACK_BBOX_HALF_DEGREES,
-                "west": lon0 - FALLBACK_BBOX_HALF_DEGREES,
-                "east": lon0 + FALLBACK_BBOX_HALF_DEGREES,
-            }
-        logger.info(f"search_chunk: query_text={query_text}, location_latlon={location_latlon}, bbox={bbox}")
-        must.append(
-            FieldCondition(
-                key="metadata.location",
-                geo_bounding_box=GeoBoundingBox(
-                    top_left=GeoPoint(lat=bbox["north"], lon=bbox["west"]),
-                    bottom_right=GeoPoint(lat=bbox["south"], lon=bbox["east"]),
-                ),
-            )
-        )
+        base_bbox = location_latlon.get("bbox") or _default_bbox(location_latlon)
         source_prefix = location_latlon.get("source_prefix")
         if source_prefix:
-            # Set by a BAY_AREA_REGION_OVERRIDES match (geocode.py) - the geo_radius
-            # above alone can't keep e.g. "South Bay" from reaching across the Bay's
-            # narrow crossings into East Bay parks, since the radius also has to be
-            # wide enough to cover genuinely-distant same-region hikes. This filters
-            # to the source site's own regional folder instead of trusting distance.
+            # Set by a BAY_AREA_REGION_OVERRIDES match (geocode.py) - the geo box
+            # alone can't keep e.g. "South Bay" from reaching across the Bay's
+            # narrow crossings into East Bay parks, since it also has to be wide
+            # enough to cover genuinely-distant same-region hikes. This filters to
+            # the source site's own regional folder instead of trusting geography,
+            # and stays fixed across every widen attempt below (widening the area
+            # searched should never change which region's documents are eligible).
             prefixed_sources = get_sources_with_prefix(source_prefix)
             if prefixed_sources:
-                must.append(FieldCondition(key="metadata.source", match=MatchAny(any=prefixed_sources)))
+                static_must.append(FieldCondition(key="metadata.source", match=MatchAny(any=prefixed_sources)))
 
-    query_filter = Filter(must=must or None, must_not=must_not or None)
+    widen_factors = GEO_WIDEN_FACTORS if base_bbox else (1.0,)
+    results = []
+    for factor in widen_factors:
+        must = list(static_must)
+        if base_bbox:
+            bbox = widen_bbox(base_bbox, factor)
+            logger.info(
+                f"search_chunk: query_text={query_text}, location_latlon={location_latlon}, "
+                f"widen_factor={factor}, bbox={bbox}"
+            )
+            must.append(
+                FieldCondition(
+                    key="metadata.location",
+                    geo_bounding_box=GeoBoundingBox(
+                        top_left=GeoPoint(lat=bbox["north"], lon=bbox["west"]),
+                        bottom_right=GeoPoint(lat=bbox["south"], lon=bbox["east"]),
+                    ),
+                )
+            )
 
-    results = _client.query_points(
-        collection_name=settings.qdrant_collection_name,
-        query=vector,
-        query_filter=query_filter,
-        limit=10,
-    ).points
+        query_filter = Filter(must=must or None, must_not=must_not or None)
+        results = _client.query_points(
+            collection_name=settings.qdrant_collection_name,
+            query=vector,
+            query_filter=query_filter,
+            limit=10,
+        ).points
+        if results:
+            break
 
     if not results:
         return None

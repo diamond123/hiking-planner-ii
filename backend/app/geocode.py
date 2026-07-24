@@ -27,6 +27,19 @@ MILES_PER_DEGREE_LAT = math.radians(1) * EARTH_RADIUS_MILES  # ~69.1 miles, lati
 # unreasonably tiny area, MAX keeps a broad match (a whole city or region)
 # from pulling in candidates from well outside the Bay Area. DEFAULT is used
 # only if Nominatim's response is ever missing a usable bounding box.
+#
+# MIN deliberately stays tight (matching the old MIN_GEO_RADIUS_MILES=6
+# floor's diameter) rather than being padded out to guarantee candidate
+# density for every small town - raising it flat to 24 did fix Livermore
+# (whose own Nominatim bbox is only ~7-8mi across, leaving just one document,
+# Sycamore Grove Park, in reach at MIN=12) but also padded Fremont's already-
+# adequate 15.3mi-wide box out far enough to reach South Bay/Peninsula
+# candidates again (e.g. Baylands Preserve in Palo Alto). search_qdrant
+# instead starts tight and only widens the box (see GEO_WIDEN_FACTORS in
+# qdrant_store.py) once it's actually run out of candidates at the current
+# size - so Fremont, which has plenty of real nearby candidates, never
+# widens at all, while Livermore only reaches further out once its one
+# nearby candidate is exhausted.
 MIN_BBOX_SIDE_MILES = 12
 MAX_BBOX_SIDE_MILES = 50
 DEFAULT_BBOX_SIDE_MILES = 30
@@ -135,6 +148,26 @@ def _bbox_around_point(lat: float, lon: float, boundingbox: list[str] | None) ->
         "north": lat + half_lat_deg,
         "west": lon - half_lon_deg,
         "east": lon + half_lon_deg,
+    }
+
+
+def widen_bbox(bbox: dict, factor: float) -> dict:
+    """Scale a {"south","north","west","east"} box outward by `factor`,
+    keeping its center fixed. Used by search_qdrant (see GEO_WIDEN_FACTORS in
+    qdrant_store.py) to cast a wider net only once the box at its current
+    size has run out of candidates, rather than starting wide for everyone.
+    """
+    if factor == 1.0:
+        return bbox
+    center_lat = (bbox["south"] + bbox["north"]) / 2
+    center_lon = (bbox["west"] + bbox["east"]) / 2
+    half_lat = (bbox["north"] - bbox["south"]) / 2 * factor
+    half_lon = (bbox["east"] - bbox["west"]) / 2 * factor
+    return {
+        "south": center_lat - half_lat,
+        "north": center_lat + half_lat,
+        "west": center_lon - half_lon,
+        "east": center_lon + half_lon,
     }
 
 
